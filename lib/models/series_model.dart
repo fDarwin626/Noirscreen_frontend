@@ -1,4 +1,4 @@
-import 'package:noirscreen/modals/video_model.dart';
+import 'package:noirscreen/models/video_model.dart';
 
 class SeriesModel {
   final String id; // e.g., "one-piece"

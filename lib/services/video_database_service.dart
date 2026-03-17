@@ -1,4 +1,4 @@
-import 'package:noirscreen/modals/video_model.dart';
+import 'package:noirscreen/models/video_model.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 
@@ -60,10 +60,10 @@ class VideoDatabaseService {
       },
     );
   }
-
   // Insert video
   Future<void> insertVideo(VideoModel video) async {
     final db = await database;
+    print('💾 DATABASE: Inserting video - ID: ${video.id}, Title: ${video.title}');
     await db.insert(
       _tableName,
       video.toJson(),
@@ -75,6 +75,7 @@ class VideoDatabaseService {
   Future<List<VideoModel>> getAllVideos() async {
     final db = await database;
     final maps = await db.query(_tableName);
+    print('💾 DATABASE: Retrieved all videos - Count: ${maps.length}');
     return maps.map((map) => VideoModel.fromJson(map)).toList();
   }
 
@@ -86,6 +87,7 @@ class VideoDatabaseService {
       where: 'category = ?',
       whereArgs: [category],
     );
+    print('💾 DATABASE: Retrieved videos by category - Count: ${maps.length}');
     return maps.map((map) => VideoModel.fromJson(map)).toList();
   }
 

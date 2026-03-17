@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:noirscreen/constants/app_text_style.dart';
+import 'package:noirscreen/screens/scanning_screen.dart';
 import 'package:noirscreen/services/api_services.dart';
 import 'package:noirscreen/services/auth_service.dart';
 import 'dart:io';
@@ -165,13 +166,12 @@ Future<void> _handleDone() async {
       ),
     );
 
-    // TODO: Navigate to home screen
-    // await Future.delayed(const Duration(seconds: 2));
-    // Navigator.pushReplacement(
-    //   context,
-    //   MaterialPageRoute(builder: (context) => const HomeScreen()),
-    // );
-
+    //  Navigate to home screen
+    await Future.delayed(const Duration(seconds: 0));
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (context) => const ScanningScreen()),
+    );
   } catch (e) {
     if (!mounted) return;
 

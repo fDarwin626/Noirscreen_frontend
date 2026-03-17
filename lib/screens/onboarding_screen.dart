@@ -20,9 +20,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final List<String> _images = [
     'assets/images/splash1.jpeg',
     'assets/images/splash2.jpeg',
-   // 'assets/images/splash3.jpeg',
+   //'assets/images/splash3.jpeg',
     'assets/images/splash4.jpeg',
-    //'assets/images/splash5.png',
+    //'assets/images/splash5.png',  
 
   ];
 
