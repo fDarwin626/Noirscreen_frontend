@@ -1,3 +1,4 @@
+import 'package:noirscreen/models/series_model.dart';
 import 'package:noirscreen/models/video_model.dart';
 
 import 'video_scanner_service.dart';
@@ -141,6 +142,22 @@ Future<List<VideoModel>> getVideosByCategory(String category) async {
     return await _database.getRecentlyWatched();
   }
 
+// Get all TV series grouped
+  Future<List<SeriesModel>> getSeriesGroups() async {
+    print('🔍 MANAGER: getSeriesGroups() called');
+    final series = await _database.getSeriesGroups();
+    print('📊 MANAGER: Returning ${series.length} series');
+    return series;
+  }
+
+  // Get all episodes for one series
+  Future<List<VideoModel>> getEpisodesForSeries(String seriesId) async {
+    print('🔍 MANAGER: getEpisodesForSeries("$seriesId") called');
+    final episodes = await _database.getEpisodeBySeries(seriesId);
+    print('📊 MANAGER: Returning ${episodes.length} episodes');
+    return episodes;
+  }
+  
   // Update video (e.g., after watching)
   Future<void> updateVideo(VideoModel video) async {
     await _database.updateVideo(video);

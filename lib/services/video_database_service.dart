@@ -1,3 +1,4 @@
+import 'package:noirscreen/models/series_model.dart';
 import 'package:noirscreen/models/video_model.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
@@ -60,10 +61,13 @@ class VideoDatabaseService {
       },
     );
   }
+
   // Insert video
   Future<void> insertVideo(VideoModel video) async {
     final db = await database;
-    print('💾 DATABASE: Inserting video - ID: ${video.id}, Title: ${video.title}');
+    print(
+      '💾 DATABASE: Inserting video - ID: ${video.id}, Title: ${video.title}',
+    );
     await db.insert(
       _tableName,
       video.toJson(),
@@ -103,34 +107,33 @@ class VideoDatabaseService {
     return maps.map((map) => VideoModel.fromJson(map)).toList();
   }
 
+  // Get current watching episode for a series
+  Future<VideoModel?> getCurrentEpisode(String seriesId) async {
+    final db = await database;
+    final maps = await db.query(
+      _tableName,
+      where: 'series_id = ? AND is_completed = 0 AND watch_progress > 0',
+      whereArgs: [seriesId],
+      orderBy: 'episode_number ASC',
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return VideoModel.fromJson(maps.first);
+  }
 
-// Get current watching episode for a series
-Future<VideoModel?> getCurrentEpisode(String seriesId) async {
-  final db = await database;
-  final maps = await db.query(
-    _tableName,
-    where: 'series_id = ? AND is_completed = 0 AND watch_progress > 0',
-    whereArgs: [seriesId],
-    orderBy: 'episode_number ASC',
-    limit: 1,
-  );
-  if (maps.isEmpty) return null;
-  return VideoModel.fromJson(maps.first);
-}
-
-// Get next unwatched episode
-Future<VideoModel?> getNextUnwatchedEpisode(String seriesId) async {
-  final db = await database;
-  final maps = await db.query(
-    _tableName,
-    where: 'series_id = ? AND is_completed = 0',
-    whereArgs: [seriesId],
-    orderBy: 'episode_number ASC',
-    limit: 1,
-  );
-  if (maps.isEmpty) return null;
-  return VideoModel.fromJson(maps.first);
-}
+  // Get next unwatched episode
+  Future<VideoModel?> getNextUnwatchedEpisode(String seriesId) async {
+    final db = await database;
+    final maps = await db.query(
+      _tableName,
+      where: 'series_id = ? AND is_completed = 0',
+      whereArgs: [seriesId],
+      orderBy: 'episode_number ASC',
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return VideoModel.fromJson(maps.first);
+  }
 
   // Get most streamed videos (stream_count >= 2)
   Future<List<VideoModel>> getMostStreamed() async {
@@ -172,6 +175,79 @@ Future<VideoModel?> getNextUnwatchedEpisode(String seriesId) async {
   Future<void> deleteVideo(String id) async {
     final db = await database;
     await db.delete(_tableName, where: 'id = ?', whereArgs: [id]);
+  }
+
+  // Get all TV Series grouped (2+ episodes only)
+  Future<List<SeriesModel>> getSeriesGroups() async {
+    final db = await database;
+    final seriesIdMaps = await db.rawQuery('''
+      SELECT 
+        series_id,
+        COUNT(*) as episode_count,
+        SUM(CASE WHEN is_completed = 1 THEN 1 ELSE 0 END) as watched_count,
+        MAX(last_watched) as last_watched
+      FROM $_tableName
+      WHERE series_id IS NOT NULL AND series_id != ''
+      GROUP BY series_id
+      HAVING COUNT(*) >= 2
+      ORDER BY MAX(last_watched) DESC NULLS LAST
+    ''');
+    print('💾 DATABASE: Found ${seriesIdMaps.length} series groups');
+
+    final List<SeriesModel> seriesList = [];
+
+    for (final row in seriesIdMaps) {
+      final seriesId = row['series_id'] as String;
+      final totalEpisodes = (row['episode_count'] as int?) ?? 0;
+      final watchedEpisodes = (row['watched_count'] as int?) ?? 0;
+      final lastWatchedStr = row['last_watched'] as String?;
+
+      final currentEpisode = await getCurrentEpisode(seriesId);
+      final headerEpisode =
+          currentEpisode ?? await getNextUnwatchedEpisode(seriesId);
+
+      final firstEpisodeMaps = await db.query(
+        _tableName,
+        where: 'series_id = ?',
+        whereArgs: [seriesId],
+        orderBy: 'episode_number ASC',
+        limit: 1,
+      );
+
+      if (firstEpisodeMaps.isEmpty) continue;
+
+      final firstEpisode = VideoModel.fromJson(firstEpisodeMaps.first);
+      final seriesTitle = seriesId
+          .split('-')
+          .map((w) => w.isEmpty ? '' : w[0].toUpperCase() + w.substring(1))
+          .join(' ');
+
+      final posterPath =
+          headerEpisode?.thumbnailPath ?? firstEpisode.thumbnailPath;
+
+      DateTime lastWatched;
+      try {
+        lastWatched = lastWatchedStr != null
+            ? DateTime.parse(lastWatchedStr)
+            : firstEpisode.dateAdded;
+      } catch (_) {
+        lastWatched = firstEpisode.dateAdded;
+      }
+
+      seriesList.add(
+        SeriesModel(
+          id: seriesId,
+          title: seriesTitle,
+          posterUrl: posterPath,
+          totalEpisodes: totalEpisodes,
+          watchedEpisodes: watchedEpisodes,
+          currentEpisode: headerEpisode,
+          lastWatched: lastWatched,
+        ),
+      );
+    }
+
+    return seriesList;
   }
 
   // Clear all videos

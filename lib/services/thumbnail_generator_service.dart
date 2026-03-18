@@ -211,11 +211,23 @@ class ThumbnailGeneratorService {
     }
   }
 
-  // Generate resume thumbnail (at watch progress timestamp)
+// Generate resume thumbnail at exact position where user stopped
+  // We delete any existing cached resume thumbnail first
+  // so it always reflects the latest position — not the first time it was generated
   Future<String?> generateResumeThumbnail(VideoModel video) async {
-    if (video.watchProgress == 0) return null;
-    
+    if ((video.watchProgress ?? 0) == 0) return null;
+
     final timeMs = video.watchProgress! * 1000;
+    final cacheDir = await _getThumbnailCacheDir();
+    final resumePath = '${cacheDir.path}/${video.id}_resume_thumb.jpg';
+
+    // Delete old resume thumbnail so we force regeneration
+    // at the new position — not the cached old one
+    final existingFile = File(resumePath);
+    if (await existingFile.exists()) {
+      await existingFile.delete();
+    }
+
     return await _extractVideoFrame(
       video.filePath,
       '${video.id}_resume',

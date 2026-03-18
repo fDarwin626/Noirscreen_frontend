@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:noirscreen/constants/app_text_style.dart';
+import 'package:noirscreen/screens/video_player_screen.dart';
 import 'dart:async';
 import 'dart:io';
 import '../models/video_model.dart';
@@ -301,6 +302,14 @@ class _ContinueWatchingCarouselState extends State<ContinueWatchingCarousel>
                   children: [
                     _WatchButton(
                       hasProgress: (video.watchProgress ?? 0) > 0,
+                      onTap: (){
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => VideoPlayerScreen(video: video),
+                          ),
+                        );
+                      },
                     ),
                     const SizedBox(width: 12),
                     _IconCircleButton(

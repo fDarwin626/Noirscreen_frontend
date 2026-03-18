@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:noirscreen/models/series_model.dart';
 import '../models/video_model.dart';
 import '../services/video_manager_service.dart';
 
@@ -67,3 +68,23 @@ final cameraVideosProvider = FutureProvider<List<VideoModel>>((ref) async {
   print('✅ PROVIDER: cameraVideosProvider returned ${videos.length} videos');
   return videos;
 });
+
+// TV Shows provider — groups episodes into series cards
+final tvShowsProvider = FutureProvider<List<SeriesModel>>((ref) async {
+  print('🔄 PROVIDER: tvShowsProvider called');
+  final manager = ref.watch(videoManagerProvider);
+  final series = await manager.getSeriesGroups();
+  print('✅ PROVIDER: tvShowsProvider returned ${series.length} series');
+  return series;
+});
+
+// Episodes provider — family means each seriesId gets its own cached instance
+final episodesProvider = FutureProvider.family<List<VideoModel>, String>(
+  (ref, seriesId) async {
+    print('🔄 PROVIDER: episodesProvider called for: $seriesId');
+    final manager = ref.watch(videoManagerProvider);
+    final episodes = await manager.getEpisodesForSeries(seriesId);
+    print('✅ PROVIDER: episodesProvider returned ${episodes.length} episodes');
+    return episodes;
+  },
+);

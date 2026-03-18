@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noirscreen/constants/app_text_style.dart';
+import 'package:noirscreen/screens/video_player_screen.dart';
 import 'dart:io';
 import '../models/video_model.dart';
 import '../constants/app_colors.dart';
@@ -18,7 +19,7 @@ class VideoCategoryRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final videosAsync = ref.watch(provider) as AsyncValue<List<VideoModel>>;
-    
+
     return videosAsync.when(
       data: (videos) {
         if (videos.isEmpty) {
@@ -52,7 +53,7 @@ class VideoCategoryRow extends ConsumerWidget {
                 itemCount: videos.length,
                 itemBuilder: (context, index) {
                   final video = videos[index];
-                  return _buildVideoCard(video);
+                  return _buildVideoCard(context, video);
                 },
               ),
             ),
@@ -64,14 +65,17 @@ class VideoCategoryRow extends ConsumerWidget {
     );
   }
 
-  Widget _buildVideoCard(VideoModel video) {
+  Widget _buildVideoCard( BuildContext context, VideoModel video) {
     return Container(
       width: 130,
       margin: const EdgeInsets.only(right: 12),
       child: GestureDetector(
         onTap: () {
-          // TODO: Navigate to video player or series detail
-          print('Play video: ${video.title}');
+          //Navigate to video player or series detail
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => VideoPlayerScreen(video: video)),
+          );
         },
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
