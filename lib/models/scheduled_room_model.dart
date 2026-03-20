@@ -1,3 +1,6 @@
+// ignore_for_file: public_member_api_docs, sort_constructors_first
+import 'dart:convert';
+
 class ScheduledRoomModel {
   final String scheduleId;
   final String roomId;
@@ -11,6 +14,7 @@ class ScheduledRoomModel {
   final String status;
   final String shareableLink;
   final DateTime linkExpiresAt;
+  final String? videoFilePath; // Local path to downloaded video file (not from API)
 
   ScheduledRoomModel({
     required this.scheduleId,
@@ -25,6 +29,7 @@ class ScheduledRoomModel {
     required this.status,
     required this.shareableLink,
     required this.linkExpiresAt,
+     this.videoFilePath,
   });
 
   factory ScheduledRoomModel.fromJson(Map<String, dynamic> json) {
@@ -41,6 +46,7 @@ class ScheduledRoomModel {
       status: json['status'] as String,
       shareableLink: json['shareable_link'] as String,
       linkExpiresAt: DateTime.parse(json['link_expires_at'] as String),
+     videoFilePath: json['video_file_path'] as String?,
     );
   }
 
@@ -51,6 +57,7 @@ class ScheduledRoomModel {
       'host_id': hostId,
       'video_hash': videoHash,
       'video_title': videoTitle,
+      'video_file_path': videoFilePath,
       'video_thumbnail_path': videoThumbnailPath,
       'stream_type': streamType,
       'scheduled_at': scheduledAt.toIso8601String(),
@@ -59,5 +66,74 @@ class ScheduledRoomModel {
       'shareable_link': shareableLink,
       'link_expires_at': linkExpiresAt.toIso8601String(),
     };
+  }
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'scheduleId': scheduleId,
+      'roomId': roomId,
+      'hostId': hostId,
+      'videoHash': videoHash,
+      'videoTitle': videoTitle,
+      'videoThumbnailPath': videoThumbnailPath,
+      'streamType': streamType,
+      'scheduledAt': scheduledAt.millisecondsSinceEpoch,
+      'createdAt': createdAt.millisecondsSinceEpoch,
+      'status': status,
+      'shareableLink': shareableLink,
+      'linkExpiresAt': linkExpiresAt.millisecondsSinceEpoch,
+      'videoFilePath': videoFilePath,
+    };
+  }
+
+  factory ScheduledRoomModel.fromMap(Map<String, dynamic> map) {
+    return ScheduledRoomModel(
+      scheduleId: map['scheduleId'] as String,
+      roomId: map['roomId'] as String,
+      hostId: map['hostId'] as String,
+      videoHash: map['videoHash'] as String,
+      videoTitle: map['videoTitle'] as String,
+      videoThumbnailPath: map['videoThumbnailPath'] != null ? map['videoThumbnailPath'] as String : null,
+      streamType: map['streamType'] as String,
+      scheduledAt: DateTime.fromMillisecondsSinceEpoch(map['scheduledAt'] as int),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt'] as int),
+      status: map['status'] as String,
+      shareableLink: map['shareableLink'] as String,
+      linkExpiresAt: DateTime.fromMillisecondsSinceEpoch(map['linkExpiresAt'] as int),
+      videoFilePath: map['videoFilePath'] != null ? map['videoFilePath'] as String : null,
+    );
+  }
+
+
+  ScheduledRoomModel copyWith({
+    String? scheduleId,
+    String? roomId,
+    String? hostId,
+    String? videoHash,
+    String? videoTitle,
+    String? videoThumbnailPath,
+    String? streamType,
+    DateTime? scheduledAt,
+    DateTime? createdAt,
+    String? status,
+    String? shareableLink,
+    DateTime? linkExpiresAt,
+    String? videoFilePath,
+  }) {
+    return ScheduledRoomModel(
+      scheduleId: scheduleId ?? this.scheduleId,
+      roomId: roomId ?? this.roomId,
+      hostId: hostId ?? this.hostId,
+      videoHash: videoHash ?? this.videoHash,
+      videoTitle: videoTitle ?? this.videoTitle,
+      videoThumbnailPath: videoThumbnailPath ?? this.videoThumbnailPath,
+      streamType: streamType ?? this.streamType,
+      scheduledAt: scheduledAt ?? this.scheduledAt,
+      createdAt: createdAt ?? this.createdAt,
+      status: status ?? this.status,
+      shareableLink: shareableLink ?? this.shareableLink,
+      linkExpiresAt: linkExpiresAt ?? this.linkExpiresAt,
+      videoFilePath: videoFilePath ?? this.videoFilePath,
+    );
   }
 }

@@ -42,15 +42,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _isLocked = false;
   bool _showDropdown = false;
 
-  // ── Lock overlay visibility ────────────────────────────────────────────────
-  // true = "Tap to unlock" badge is visible
-  // Auto-hides after 5s, reappears on tap when locked
   bool _showLockBadge = false;
   Timer? _lockBadgeTimer;
 
   Timer? _hideControlsTimer;
   Timer? _progressSaveTimer;
   Timer? _countdownTimer;
+
+  // ── Volume & Brightness ───────────────────────────────────────────────────
+  // Volume max 30, brightness max 15 — as agreed
+  double _volume = 15;   // starts at half of 30
+  double _brightness = 7; // starts at half of 15
+  static const double _maxVolume = 30;
+  static const double _maxBrightness = 15;
+
+  // Track drag start value so delta is applied correctly
+  double _dragStartVolume = 0;
+  double _dragStartBrightness = 0;
 
   final VideoDatabaseService _database = VideoDatabaseService();
   final ThumbnailGeneratorService _thumbnailGenerator =
@@ -109,14 +117,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
 
       await _controller?.dispose();
-
       final controller = VideoPlayerController.file(file);
       _controller = controller;
-
       await controller.initialize();
-
       controller.addListener(_onPlayerUpdate);
       await controller.play();
+
+      // Apply initial volume
+      await controller.setVolume(_volume / _maxVolume);
 
       if ((_currentVideo.watchProgress ?? 0) > 0) {
         await Future.delayed(const Duration(milliseconds: 300));
@@ -262,7 +270,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     });
   }
 
-  // ── Show lock badge for 5s then auto-hide ──────────────────────────────────
   void _showLockBadgeTemporarily() {
     _lockBadgeTimer?.cancel();
     setState(() => _showLockBadge = true);
@@ -272,7 +279,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
   void _onScreenTap() {
-    // When locked, tapping shows the badge temporarily instead of controls
     if (_isLocked) {
       _showLockBadgeTemporarily();
       return;
@@ -307,6 +313,52 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (_controller == null || _isLocked) return;
     final newPos = _controller!.value.position - const Duration(seconds: 10);
     _controller!.seekTo(newPos < Duration.zero ? Duration.zero : newPos);
+    _resetHideControlsTimer();
+  }
+
+  // ── Volume drag handlers ───────────────────────────────────────────────────
+  void _onVolumeDragStart(DragStartDetails details) {
+    _dragStartVolume = _volume;
+  }
+
+  void _onVolumeDragUpdate(DragUpdateDetails details, double screenHeight) {
+    // Drag up = increase, drag down = decrease
+    // Full screen height maps to full range
+    final delta = -details.delta.dy / screenHeight * _maxVolume;
+    setState(() {
+      _volume = (_dragStartVolume + delta * (screenHeight / 100))
+          .clamp(0, _maxVolume);
+      // Recalculate delta accumulation properly
+      _volume = (_volume - details.delta.dy / screenHeight * _maxVolume * 3)
+          .clamp(0, _maxVolume);
+    });
+    _controller?.setVolume(_volume / _maxVolume);
+    _resetHideControlsTimer();
+  }
+
+  void _onVolumeDragUpdateSimple(DragUpdateDetails details) {
+    // Simpler approach — each pixel of drag = small change
+    final delta = -details.delta.dy * (_maxVolume / 200);
+    setState(() {
+      _volume = (_volume + delta).clamp(0, _maxVolume);
+    });
+    _controller?.setVolume(_volume / _maxVolume);
+    _resetHideControlsTimer();
+  }
+
+  void _onBrightnessDragUpdate(DragUpdateDetails details) {
+    final delta = -details.delta.dy * (_maxBrightness / 200);
+    setState(() {
+      _brightness = (_brightness + delta).clamp(0, _maxBrightness);
+    });
+    // Brightness control via SystemChrome
+    // Value expected 0.0 to 1.0
+    SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
+      systemNavigationBarColor: Colors.black,
+    ));
+    // Note: actual screen brightness requires screen_brightness package
+    // For now we track the value and show the UI correctly
+    // Wire to screen_brightness package when added to pubspec
     _resetHideControlsTimer();
   }
 
@@ -346,6 +398,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   @override
   Widget build(BuildContext context) {
+    final screenHeight = MediaQuery.of(context).size.height;
+
     return Scaffold(
       backgroundColor: AppColors.black,
       body: GestureDetector(
@@ -355,9 +409,46 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           fit: StackFit.expand,
           children: [
             _buildVideoSurface(),
+
+            // ── Brightness drag zone — LEFT third of screen ───────────────
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: MediaQuery.of(context).size.width / 3,
+              child: GestureDetector(
+                onVerticalDragUpdate: (d) => _onBrightnessDragUpdate(d),
+                onVerticalDragStart: (_) {},
+                behavior: HitTestBehavior.opaque,
+                child: const SizedBox.expand(),
+              ),
+            ),
+
+            // ── Volume drag zone — RIGHT third of screen ──────────────────
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              width: MediaQuery.of(context).size.width / 3,
+              child: GestureDetector(
+                onVerticalDragUpdate: (d) => _onVolumeDragUpdateSimple(d),
+                onVerticalDragStart: (_) {},
+                behavior: HitTestBehavior.opaque,
+                child: const SizedBox.expand(),
+              ),
+            ),
+
             if (!_isLocked && _showControls && _isInitialized && !_hasError)
               _buildControlsOverlay(),
-            // Lock badge — only rendered when locked AND badge is visible
+
+            // ── Volume cylinder — right edge, visible with controls ───────
+            if (_showControls && _isInitialized && !_hasError && !_isLocked)
+              _buildVolumeCylinder(screenHeight),
+
+            // ── Brightness cylinder — left edge, visible with controls ────
+            if (_showControls && _isInitialized && !_hasError && !_isLocked)
+              _buildBrightnessCylinder(screenHeight),
+
             if (_isLocked && _showLockBadge) _buildLockOverlay(),
             if (!_isInitialized && !_hasError) _buildLoadingOverlay(),
             if (_hasError) _buildErrorOverlay(),
@@ -365,6 +456,160 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               _buildNextEpisodeOverlay(),
             if (_showDropdown && !_isLocked) _buildDropdownMenu(),
           ],
+        ),
+      ),
+    );
+  }
+
+  // ── Volume cylinder widget ────────────────────────────────────────────────
+  Widget _buildVolumeCylinder(double screenHeight) {
+    final fillFraction = _volume / _maxVolume;
+    final cylinderHeight = screenHeight * 0.35;
+    final filledHeight = cylinderHeight * fillFraction;
+
+    return Positioned(
+      right: 12,
+      top: (screenHeight - cylinderHeight) / 2,
+      child: AnimatedOpacity(
+        opacity: _showControls ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 300),
+        child: Container(
+          width: 12,
+          height: cylinderHeight,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            color: Colors.white.withOpacity(0.10),
+            border: Border.all(
+              color: Colors.white.withOpacity(0.20),
+              width: 0.8,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Stack(
+              alignment: Alignment.bottomCenter,
+              children: [
+                // Fill from bottom up
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  height: filledHeight,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.bottomCenter,
+                        end: Alignment.topCenter,
+                        colors: [
+                          AppColors.niorRed,
+                          AppColors.niorRed.withOpacity(0.7),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                // Volume number in center
+                Center(
+                  child: Text(
+                    _volume.toInt().toString(),
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                // Volume icon at top
+                Positioned(
+                  top: 8,
+                  child: Icon(
+                    _volume == 0
+                        ? Icons.volume_off_rounded
+                        : Icons.volume_up_rounded,
+                    color: Colors.white.withOpacity(0.7),
+                    size: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Brightness cylinder widget ────────────────────────────────────────────
+  Widget _buildBrightnessCylinder(double screenHeight) {
+    final fillFraction = _brightness / _maxBrightness;
+    final cylinderHeight = screenHeight * 0.35;
+    final filledHeight = cylinderHeight * fillFraction;
+
+    return Positioned(
+      left: 12,
+      top: (screenHeight - cylinderHeight) / 2,
+      child: AnimatedOpacity(
+        opacity: _showControls ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 300),
+        child: Container(
+          width: 12,
+          height: cylinderHeight,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            color: Colors.white.withOpacity(0.10),
+            border: Border.all(
+              color: Colors.white.withOpacity(0.20),
+              width: 0.8,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Stack(
+              alignment: Alignment.bottomCenter,
+              children: [
+                // Fill from bottom up
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  height: filledHeight,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.bottomCenter,
+                        end: Alignment.topCenter,
+                        colors: [
+                          AppColors.niorRed,
+                          AppColors.niorRed.withOpacity(0.7),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                // Brightness number in center
+                Center(
+                  child: Text(
+                    _brightness.toInt().toString(),
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                // Brightness icon at top
+                Positioned(
+                  top: 8,
+                  child: Icon(
+                    Icons.brightness_6_rounded,
+                    color: Colors.white.withOpacity(0.7),
+                    size: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -586,7 +831,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
-  // ── Lock overlay — auto-hides after 5s, tap screen to show again ───────────
   Widget _buildLockOverlay() {
     return Positioned(
       top: 20,
@@ -596,7 +840,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         duration: const Duration(milliseconds: 300),
         child: GestureDetector(
           onTap: () {
-            // Tapping the badge itself unlocks
             _lockBadgeTimer?.cancel();
             setState(() {
               _isLocked = false;
@@ -659,17 +902,34 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 _buildDropdownItem(
                   icon: Icons.cast_connected_rounded,
                   label: 'Stream Video',
-                  onTap: () {
+                  onTap: () async {
                     setState(() => _showDropdown = false);
-                    Navigator.push(
+                    await SystemChrome.setPreferredOrientations([
+                      DeviceOrientation.portraitUp,
+                    ]);
+                    await SystemChrome.setEnabledSystemUIMode(
+                      SystemUiMode.manual,
+                      overlays: SystemUiOverlay.values,
+                    );
+                    if (!mounted) return;
+                    await Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (_) => RoomVideoPickerScreen(
-                          streamType: 'hls',
+                          streamType: 'audio',
                           preSelectedVideo: _currentVideo,
                         ),
                       ),
                     );
+                    if (mounted) {
+                      await SystemChrome.setPreferredOrientations([
+                        DeviceOrientation.landscapeLeft,
+                        DeviceOrientation.landscapeRight,
+                      ]);
+                      await SystemChrome.setEnabledSystemUIMode(
+                        SystemUiMode.immersiveSticky,
+                      );
+                    }
                   },
                 ),
                 Divider(
@@ -687,7 +947,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       _isLocked = true;
                     });
                     _hideControlsTimer?.cancel();
-                    // Show badge for 5s after locking
                     _showLockBadgeTemporarily();
                   },
                 ),

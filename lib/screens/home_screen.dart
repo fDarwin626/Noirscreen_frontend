@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noirscreen/constants/app_text_style.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:noirscreen/screens/room_screen.dart';
+import 'package:noirscreen/services/video_manager_service.dart';
 import 'dart:io';
 import '../constants/app_colors.dart';
 import '../providers/home_provider.dart';
@@ -245,8 +246,28 @@ class _HomeContent extends ConsumerWidget {
     final tvShows = ref.watch(tvShowsProvider);
     final statusBarHeight = MediaQuery.of(context).padding.top;
 
-    return CustomScrollView(
-      slivers: [
+    return RefreshIndicator(
+      color: AppColors.niorRed,
+      backgroundColor: AppColors.darkGray,
+      onRefresh: () async {
+        try {
+          final videoManager = VideoManagerService();
+          await videoManager.quickScan();
+        } catch (e) {
+          print('⚠️ HOME: Refresh scan failed - $e');
+        }
+        ref.invalidate(allVideosProvider);
+        ref.invalidate(downloadedVideosProvider);
+        ref.invalidate(whatsappVideosProvider);
+        ref.invalidate(mostStreamedProvider);
+        ref.invalidate(recentlyWatchedProvider);
+        ref.invalidate(moviesProvider);
+        ref.invalidate(cameraVideosProvider);
+        ref.invalidate(tvShowsProvider);
+      },
+      child: CustomScrollView(
+        slivers: [
+
         // ── Hero carousel + floating header ─────────────────────────
         SliverToBoxAdapter(
           child: Stack(
@@ -396,6 +417,7 @@ class _HomeContent extends ConsumerWidget {
 
         const SliverToBoxAdapter(child: SizedBox(height: 100)),
       ],
+      ),
     );
   }
 

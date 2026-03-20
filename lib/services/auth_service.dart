@@ -1,6 +1,7 @@
 import 'dart:core';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as _storage;
 import 'package:uuid/uuid.dart';
 
 
@@ -26,6 +27,11 @@ class AuthService {
   Future<String?> getUserId() async {
     return await _secureStorage.read(key: _userIdKey);
   }
+
+// Clears the saved userId (used when backend cannot find user)
+Future<void>clearUserId()async{
+  await _secureStorage.delete(key: 'user_id');
+}
 
   // Check if user is authenticated (has user ID saved)
   Future<bool> isAuthenticated() async {

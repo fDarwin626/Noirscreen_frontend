@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/scheduled_room_model.dart';
 import 'api_services.dart';
 import 'auth_service.dart';
@@ -39,6 +38,7 @@ class RoomsService {
     required String videoHash,
     required String videoTitle,
     required String videoThumbnailPath,
+    required String videoFilePath,
     required String streamType,
     required DateTime scheduledAt,
     required int videoDuration,
@@ -70,6 +70,7 @@ class RoomsService {
           'video_hash': videoHash,
           'video_title': videoTitle,
           'video_thumbnail_path': videoThumbnailPath,
+          'video_file_path': videoFilePath,
           'stream_type': streamType,
           'scheduled_at': scheduledAt.toIso8601String(),
           'video_duration': videoDuration,
@@ -134,6 +135,32 @@ class RoomsService {
     } catch (e) {
       print('❌ ROOMS SERVICE: joinViaLink error - $e');
       rethrow;
+    }
+  }
+
+  // Get the most recently completed room for history display
+  // Shown at the bottom of the Rooms screen replacing the illustration
+  // after at least one room has been completed
+  Future<List<ScheduledRoomModel>> getCompletedRooms() async {
+    try {
+      final userId = await _authService.getUserId();
+      if (userId == null) return [];
+
+      final response = await http.get(
+        Uri.parse('${ApiService.baseUrl}/api/rooms/completed/$userId'),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final List rooms = data['rooms'] as List;
+        return rooms
+            .map((r) => ScheduledRoomModel.fromJson(r))
+            .toList();
+      }
+      return [];
+    } catch (e) {
+      print('❌ ROOMS SERVICE: getCompletedRooms - $e');
+      return [];
     }
   }
 }

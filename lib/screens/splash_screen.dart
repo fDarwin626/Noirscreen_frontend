@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:noirscreen/constants/app_text_style.dart';
+import 'package:noirscreen/screens/home_screen.dart';
 import 'package:noirscreen/screens/onboarding_screen.dart';
+import 'package:noirscreen/services/api_services.dart';
+import 'package:noirscreen/services/auth_service.dart';
 import 'dart:math' as math;
 import '../constants/app_colors.dart';
+import '../services/video_manager_service.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -91,7 +95,7 @@ class _SplashScreenState extends State<SplashScreen>
 
   bool _showLoading = false;
 
-  void _startSequence() async {
+void _startSequence() async {
     await Future.delayed(const Duration(milliseconds: 400));
 
     _barWipeController.forward();
@@ -109,23 +113,76 @@ class _SplashScreenState extends State<SplashScreen>
     _taglineController.forward();
     await Future.delayed(const Duration(milliseconds: 2000));
 
-    if (mounted) {
-      setState(() {
-        _showLoading = true;
-      });
-    }
-    // loading for 5 sec than navigate
-    await Future.delayed(const Duration(microseconds: 5000));
-    if (mounted) {
-      // Navigate to the next screen or perform any action after the splash screen
-      Navigator.pushReplacement(
-        context, 
-        MaterialPageRoute(builder:(context) => const OnboardingScreen(),
-        ),
-      );
+    if (mounted) setState(() => _showLoading = true);
+
+    // Now check auth while loading spinner is visible
+    await _checkAuthAndNavigate();
+  }
+
+  // Check if user is already registered on this device.
+  // If yes — go to HomeScreen directly.
+  // If no — go to OnboardingScreen as normal.
+  // This fixes the "register again every time" problem.
+  Future<void> _checkAuthAndNavigate() async {
+    if (!mounted) return;
+
+    try {
+      final authService = AuthService();
+      final apiService = ApiService();
+
+      final savedUserId = await authService.getUserId();
+
+      if (savedUserId == null || savedUserId.isEmpty) {
+        // No user on device — first time — go to onboarding
+        _navigateTo(const OnboardingScreen());
+        return;
+      }
+
+      // userId found — confirm user still exists on backend
+      // Handles dev DB wipes gracefully
+      final user = await apiService.getUser(savedUserId);
+
+      if (user != null) {
+        // Run silent background scan before going home
+        // quickScan skips existing files — only adds new ones
+        // Errors are swallowed so they never block navigation
+        try {
+          final videoManager = VideoManagerService();
+          await videoManager.quickScan();
+          print('✅ SPLASH: Background scan complete');
+        } catch (e) {
+          print('⚠️ SPLASH: Background scan failed silently - $e');
+        }
+        _navigateTo(HomeScreen(shouldRefresh: true));
+
+      } else {
+        // userId saved but backend has no record — DB was wiped
+        // Clear the stale id and send to onboarding
+        await authService.clearUserId();
+        _navigateTo(const OnboardingScreen());
+      }
+    } catch (e) {
+      // Network down or any error — default to onboarding
+      // Never block the user on an error screen
+      print('❌ SPLASH: $e');
+      _navigateTo(const OnboardingScreen());
     }
   }
 
+  void _navigateTo(Widget screen) {
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 600),
+        pageBuilder: (_, animation, __) => screen,
+        transitionsBuilder: (_, animation, __, child) => FadeTransition(
+          opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+          child: child,
+        ),
+      ),
+    );
+  }
   @override
   void dispose() {
     _barWipeController.dispose();

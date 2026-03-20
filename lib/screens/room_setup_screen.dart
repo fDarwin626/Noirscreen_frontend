@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:noirscreen/providers/rooms_provider.dart';
 import 'dart:ui';
 import 'dart:io';
 import '../constants/app_colors.dart';
@@ -26,7 +27,7 @@ class RoomSetupScreen extends ConsumerStatefulWidget {
 class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
     with TickerProviderStateMixin {
 
-bool _isScheduled = false;
+  bool _isScheduled = false;
   DateTime _selectedDateTime =
       DateTime.now().add(const Duration(minutes: 10));
   int _minutesFromNow = 10;
@@ -40,14 +41,17 @@ bool _isScheduled = false;
     duration: const Duration(milliseconds: 460),
     vsync: this,
   );
-  late final Animation<double> _panelFade =
-      CurvedAnimation(parent: _panelController,
-          curve: const Interval(0.0, 0.7, curve: Curves.easeOut));
+  late final Animation<double> _panelFade = CurvedAnimation(
+    parent: _panelController,
+    curve: const Interval(0.0, 0.7, curve: Curves.easeOut),
+  );
   late final Animation<Offset> _panelSlide = Tween<Offset>(
     begin: const Offset(0, 0.08),
     end: Offset.zero,
   ).animate(CurvedAnimation(
-      parent: _panelController, curve: Curves.easeOutCubic));
+    parent: _panelController,
+    curve: Curves.easeOutCubic,
+  ));
 
   late final AnimationController _backController = AnimationController(
     duration: const Duration(milliseconds: 280),
@@ -99,31 +103,56 @@ bool _isScheduled = false;
     }
   }
 
+  // ── Create room ─────────────────────────────────────────────────────────────
   Future<void> _createRoom() async {
     if (_isCreatingLink) return;
     setState(() => _isCreatingLink = true);
     HapticFeedback.lightImpact();
+
     try {
       final now = DateTime.now();
-      final scheduled = _isScheduled
+
+      // scheduledTime is either the slider value (NOW mode)
+      // or the date/time the user picked (SCHEDULE mode)
+      // In NOW mode we add 2min10s — the extra 10s is a buffer so the
+      // backend validation (which also checks >= 2 min) does not fail
+      // due to the few hundred milliseconds of network travel time
+      final scheduledTime = _isScheduled
           ? _selectedDateTime
-          : now.add(const Duration(minutes: 2));
-      if (scheduled.difference(now).inMinutes < 2) {
-        _err('Schedule at least 2 minutes from now'); return;
+          : now.add(const Duration(minutes: 2, seconds: 10));
+
+      // Only validate minimum time in SCHEDULE mode
+      // In NOW mode the time is always now + 2min10s so it always passes
+      if (_isScheduled && scheduledTime.difference(now).inMinutes < 2) {
+        _err('Schedule at least 2 minutes from now');
+        return;
       }
-      if (scheduled.difference(now).inDays > 5) {
-        _err('Cannot schedule more than 5 days ahead'); return;
+
+      // Maximum 5 days in advance — applies to both modes
+      if (scheduledTime.difference(now).inDays > 5) {
+        _err('Cannot schedule more than 5 days ahead');
+        return;
       }
+
       final hash = FileNameParser.generateVideoId(widget.video.filePath);
+
       final room = await _roomsService.createRoom(
         videoHash: hash,
         videoTitle: widget.video.title,
         videoThumbnailPath: widget.video.thumbnailPath ?? '',
+        videoFilePath: widget.video.filePath,
         streamType: widget.streamType,
-        scheduledAt: scheduled,
+        scheduledAt: scheduledTime,
         videoDuration: widget.video.duration,
       );
-      if (mounted && room != null) setState(() => _createdRoom = room);
+
+      if (mounted && room != null) {
+        // Attach the local file path to the room model so when the
+        // owner taps the live card the video player knows which file to play
+        setState(() => _createdRoom = room.copyWith(
+          videoFilePath: widget.video.filePath,
+        ));
+      }
     } catch (e) {
       _err(e.toString().replaceAll('Exception: ', ''));
     } finally {
@@ -133,12 +162,14 @@ bool _isScheduled = false;
 
   void _err(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg,
-          style: const TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 13)),
+      content: Text(
+        msg,
+        style: const TextStyle(
+            fontFamily: 'Inter', color: Colors.white, fontSize: 13),
+      ),
       backgroundColor: AppColors.error,
       behavior: SnackBarBehavior.floating,
-      shape:
-          RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
     ));
   }
 
@@ -147,14 +178,15 @@ bool _isScheduled = false;
     Clipboard.setData(ClipboardData(text: _createdRoom!.shareableLink));
     HapticFeedback.lightImpact();
     setState(() => _linkCopied = true);
-    Future.delayed(const Duration(seconds: 2),
-        () { if (mounted) setState(() => _linkCopied = false); });
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _linkCopied = false);
+    });
   }
 
-Future<void> _pickDateTime() async {
+  // ── Date picker (SCHEDULE mode) ────────────────────────────────────────────
+  Future<void> _pickDateTime() async {
     final now = DateTime.now();
 
-    // Step 1 — date picker (calendar looks fine, keep it)
     final date = await showDatePicker(
       context: context,
       initialDate: _selectedDateTime,
@@ -174,7 +206,6 @@ Future<void> _pickDateTime() async {
     );
     if (date == null || !mounted) return;
 
-    // Step 2 — custom scroll-wheel time picker (no green AM/PM clock)
     final picked = await _showTimeScrollPicker(date);
     if (picked == null || !mounted) return;
 
@@ -185,8 +216,8 @@ Future<void> _pickDateTime() async {
     setState(() => _selectedDateTime = picked);
   }
 
-  // Custom modern time picker — scroll wheels + AM/PM toggle
-  // Replaces Flutter's default clock face which has the ugly green AM/PM
+  // ── Custom scroll-wheel time picker ───────────────────────────────────────
+  // Replaces Flutter's default clock face with ugly green AM/PM
   Future<DateTime?> _showTimeScrollPicker(DateTime date) async {
     int selHour = _selectedDateTime.hour > 12
         ? _selectedDateTime.hour - 12
@@ -194,10 +225,8 @@ Future<void> _pickDateTime() async {
     int selMinute = (_selectedDateTime.minute ~/ 5) * 5;
     bool isAM = _selectedDateTime.hour < 12;
 
-    final hourCtrl =
-        FixedExtentScrollController(initialItem: selHour - 1);
-    final minCtrl =
-        FixedExtentScrollController(initialItem: selMinute ~/ 5);
+    final hourCtrl = FixedExtentScrollController(initialItem: selHour - 1);
+    final minCtrl = FixedExtentScrollController(initialItem: selMinute ~/ 5);
 
     final result = await showModalBottomSheet<DateTime>(
       context: context,
@@ -205,8 +234,7 @@ Future<void> _pickDateTime() async {
       isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setModal) => ClipRRect(
-          borderRadius:
-              const BorderRadius.vertical(top: Radius.circular(24)),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
           child: BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
             child: Container(
@@ -246,7 +274,6 @@ Future<void> _pickDateTime() async {
                   ),
                   const SizedBox(height: 24),
 
-                  // Scroll wheels row
                   SizedBox(
                     height: 180,
                     child: Row(
@@ -256,14 +283,13 @@ Future<void> _pickDateTime() async {
                           child: _scrollWheel(
                             controller: hourCtrl,
                             itemCount: 12,
-                            label: (i) =>
-                                (i + 1).toString().padLeft(2, '0'),
+                            label: (i) => (i + 1).toString().padLeft(2, '0'),
                             onChanged: (i) =>
                                 setModal(() => selHour = i + 1),
                           ),
                         ),
 
-                        // Colon
+                        // Colon separator
                         Padding(
                           padding: const EdgeInsets.only(bottom: 4),
                           child: Text(
@@ -313,7 +339,7 @@ Future<void> _pickDateTime() async {
 
                   const SizedBox(height: 24),
 
-                  // Confirm button — same glass style as rest of screen
+                  // Confirm button
                   GestureDetector(
                     onTap: () {
                       int h24;
@@ -324,8 +350,8 @@ Future<void> _pickDateTime() async {
                       }
                       Navigator.pop(
                         ctx,
-                        DateTime(date.year, date.month, date.day,
-                            h24, selMinute),
+                        DateTime(
+                            date.year, date.month, date.day, h24, selMinute),
                       );
                     },
                     child: Container(
@@ -440,7 +466,7 @@ Future<void> _pickDateTime() async {
     );
   }
 
-  // Now slider — 2 min to 24 hrs
+  // ── NOW slider — 2 min to 24 hrs ──────────────────────────────────────────
   Widget _buildNowSlider() {
     final h = _minutesFromNow ~/ 60;
     final m = _minutesFromNow % 60;
@@ -455,8 +481,7 @@ Future<void> _pickDateTime() async {
       children: [
         Row(
           children: [
-            Icon(Icons.timer_rounded,
-                color: AppColors.niorRed, size: 13),
+            Icon(Icons.timer_rounded, color: AppColors.niorRed, size: 13),
             const SizedBox(width: 7),
             Text(
               label,
@@ -509,23 +534,29 @@ Future<void> _pickDateTime() async {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('2 min',
-                  style: TextStyle(
-                      fontFamily: 'Inter',
-                      color: Colors.white.withOpacity(0.18),
-                      fontSize: 9)),
-              Text('24 hrs',
-                  style: TextStyle(
-                      fontFamily: 'Inter',
-                      color: Colors.white.withOpacity(0.18),
-                      fontSize: 9)),
+              Text(
+                '2 min',
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.18),
+                  fontSize: 9,
+                ),
+              ),
+              Text(
+                '24 hrs',
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.18),
+                  fontSize: 9,
+                ),
+              ),
             ],
           ),
         ),
       ],
     );
   }
-  
+
   @override
   Widget build(BuildContext context) {
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -535,14 +566,14 @@ Future<void> _pickDateTime() async {
 
     final size = MediaQuery.of(context).size;
     final statusH = MediaQuery.of(context).padding.top;
-    final cardWidth  = size.width * 0.62;
+    final cardWidth = size.width * 0.62;
     final cardHeight = cardWidth * 1.55;
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
       body: Stack(
         children: [
-          // ── Blurred ambient background ───────────────────────────
+          // ── Blurred ambient background ─────────────────────────────
           Positioned.fill(
             child: Stack(
               fit: StackFit.expand,
@@ -557,20 +588,18 @@ Future<void> _pickDateTime() async {
                         ),
                       )
                     : const SizedBox.shrink(),
-                // Light overlay — poster is visible through the blur
                 Container(color: Colors.black.withOpacity(0.38)),
               ],
             ),
           ),
 
-          // ── Main scrollable body ─────────────────────────────────
+          // ── Main scrollable body ───────────────────────────────────
           SingleChildScrollView(
-            padding: EdgeInsets.only(
-                top: statusH + 60, bottom: 50),
+            padding: EdgeInsets.only(top: statusH + 60, bottom: 50),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // ── Title block (above card, same as picker) ────────
+                // ── Title + badges above card ──────────────────────
                 SlideTransition(
                   position: _panelSlide,
                   child: FadeTransition(
@@ -581,12 +610,10 @@ Future<void> _pickDateTime() async {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Category + type badges
                           Wrap(
                             spacing: 6,
                             children: [
-                              _pill(
-                                  widget.video.category.toUpperCase(),
+                              _pill(widget.video.category.toUpperCase(),
                                   color: AppColors.niorRed),
                               _pill(_typeLabel.toUpperCase()),
                             ],
@@ -609,7 +636,8 @@ Future<void> _pickDateTime() async {
                             const SizedBox(height: 4),
                             Text(
                               widget.video.seasonEpisode!,
-                              style: TextStyle(fontFamily: 'Inter', 
+                              style: TextStyle(
+                                fontFamily: 'Inter',
                                 color: Colors.white.withOpacity(0.35),
                                 fontSize: 12,
                               ),
@@ -621,7 +649,7 @@ Future<void> _pickDateTime() async {
                   ),
                 ),
 
-                // ── THE CARD — same poker proportions as picker ──────
+                // ── Poster card ────────────────────────────────────
                 Center(
                   child: Hero(
                     tag: 'poster_${widget.video.id}',
@@ -652,9 +680,11 @@ Future<void> _pickDateTime() async {
                                         _posterPh(),
                                   )
                                 : _posterPh(),
-                            // Subtle bottom scrim
+                            // Bottom scrim
                             Positioned(
-                              bottom: 0, left: 0, right: 0,
+                              bottom: 0,
+                              left: 0,
+                              right: 0,
                               height: cardHeight * 0.35,
                               child: DecoratedBox(
                                 decoration: BoxDecoration(
@@ -669,11 +699,13 @@ Future<void> _pickDateTime() async {
                                 ),
                               ),
                             ),
-                            // Progress bar
+                            // Progress bar if partially watched
                             if ((widget.video.watchProgress ?? 0) > 0 &&
                                 widget.video.duration > 0)
                               Positioned(
-                                bottom: 0, left: 0, right: 0,
+                                bottom: 0,
+                                left: 0,
+                                right: 0,
                                 child: LinearProgressIndicator(
                                   value: (widget.video.watchProgress! /
                                           widget.video.duration)
@@ -690,8 +722,7 @@ Future<void> _pickDateTime() async {
                             Positioned.fill(
                               child: DecoratedBox(
                                 decoration: BoxDecoration(
-                                  borderRadius:
-                                      BorderRadius.circular(32),
+                                  borderRadius: BorderRadius.circular(32),
                                   border: Border.all(
                                     color: Colors.white.withOpacity(0.12),
                                     width: 0.8,
@@ -708,7 +739,7 @@ Future<void> _pickDateTime() async {
 
                 const SizedBox(height: 28),
 
-                // ── Setup or Link panel below the card ───────────────
+                // ── Setup or Link panel ────────────────────────────
                 SlideTransition(
                   position: _panelSlide,
                   child: FadeTransition(
@@ -722,16 +753,17 @@ Future<void> _pickDateTime() async {
             ),
           ),
 
-          // ── Back button ──────────────────────────────────────────
+          // ── Back button ───────────────────────────────────────────
           Positioned(
-            top: 0, left: 0, right: 0,
+            top: 0,
+            left: 0,
+            right: 0,
             child: SafeArea(
               bottom: false,
               child: FadeTransition(
                 opacity: _backFade,
                 child: Padding(
-                  padding:
-                      const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
                   child: Align(
                     alignment: Alignment.centerLeft,
                     child: GestureDetector(
@@ -739,16 +771,18 @@ Future<void> _pickDateTime() async {
                       behavior: HitTestBehavior.opaque,
                       child: ClipOval(
                         child: BackdropFilter(
-                          filter: ImageFilter.blur(
-                              sigmaX: 10, sigmaY: 10),
+                          filter:
+                              ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                           child: Container(
-                            width: 42, height: 42,
+                            width: 42,
+                            height: 42,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               color: Colors.white.withOpacity(0.10),
                               border: Border.all(
-                                  color: Colors.white.withOpacity(0.15),
-                                  width: 0.8),
+                                color: Colors.white.withOpacity(0.15),
+                                width: 0.8,
+                              ),
                             ),
                             child: const Icon(
                               Icons.arrow_back_ios_new_rounded,
@@ -769,14 +803,14 @@ Future<void> _pickDateTime() async {
     );
   }
 
-  // ── SETUP PANEL ────────────────────────────────────────────────────────────
+  // ── Setup panel ────────────────────────────────────────────────────────────
   Widget _buildSetupPanel() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Glass info card
+          // About this stream glass card
           ClipRRect(
             borderRadius: BorderRadius.circular(20),
             child: BackdropFilter(
@@ -788,7 +822,9 @@ Future<void> _pickDateTime() async {
                   color: Colors.white.withOpacity(0.06),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                      color: Colors.white.withOpacity(0.10), width: 0.8),
+                    color: Colors.white.withOpacity(0.10),
+                    width: 0.8,
+                  ),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -797,7 +833,8 @@ Future<void> _pickDateTime() async {
                     const SizedBox(height: 8),
                     Text(
                       _typeGuide,
-                      style: TextStyle(fontFamily: 'Inter', 
+                      style: TextStyle(
+                        fontFamily: 'Inter',
                         color: Colors.white.withOpacity(0.50),
                         fontSize: 13,
                         height: 1.6,
@@ -811,7 +848,7 @@ Future<void> _pickDateTime() async {
 
           const SizedBox(height: 16),
 
-          // Glass when card
+          // When glass card
           ClipRRect(
             borderRadius: BorderRadius.circular(20),
             child: BackdropFilter(
@@ -823,7 +860,9 @@ Future<void> _pickDateTime() async {
                   color: Colors.white.withOpacity(0.06),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                      color: Colors.white.withOpacity(0.10), width: 0.8),
+                    color: Colors.white.withOpacity(0.10),
+                    width: 0.8,
+                  ),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -840,8 +879,6 @@ Future<void> _pickDateTime() async {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    // NOW = slider 2min → 24hrs
-                    // SCHEDULE = date + custom time picker
                     if (!_isScheduled)
                       _buildNowSlider()
                     else ...[
@@ -850,9 +887,10 @@ Future<void> _pickDateTime() async {
                       Text(
                         'Min 2 min · Max 5 days',
                         style: TextStyle(
-                            fontFamily: 'Inter',
-                            color: Colors.white.withOpacity(0.18),
-                            fontSize: 10),
+                          fontFamily: 'Inter',
+                          color: Colors.white.withOpacity(0.18),
+                          fontSize: 10,
+                        ),
                       ),
                     ],
                   ],
@@ -863,7 +901,7 @@ Future<void> _pickDateTime() async {
 
           const SizedBox(height: 24),
 
-          // CTA
+          // Create room CTA button
           SizedBox(
             width: double.infinity,
             height: 52,
@@ -884,7 +922,8 @@ Future<void> _pickDateTime() async {
                     child: Center(
                       child: _isCreatingLink
                           ? SizedBox(
-                              width: 18, height: 18,
+                              width: 18,
+                              height: 18,
                               child: CircularProgressIndicator(
                                 strokeWidth: 1.5,
                                 color: Colors.white.withOpacity(0.40),
@@ -899,7 +938,8 @@ Future<void> _pickDateTime() async {
                                 SizedBox(width: 8),
                                 Text(
                                   'CREATE ROOM',
-                                  style: TextStyle(fontFamily: 'BebasNeue',
+                                  style: TextStyle(
+                                    fontFamily: 'BebasNeue',
                                     color: Colors.black,
                                     fontSize: 16,
                                     fontWeight: FontWeight.normal,
@@ -921,7 +961,8 @@ Future<void> _pickDateTime() async {
 
   Widget _sectionLabel(String text) => Text(
         text,
-        style: TextStyle(fontFamily: 'Inter', 
+        style: TextStyle(
+          fontFamily: 'Inter',
           color: Colors.white.withOpacity(0.22),
           fontSize: 9,
           fontWeight: FontWeight.w800,
@@ -951,7 +992,8 @@ Future<void> _pickDateTime() async {
           child: Center(
             child: Text(
               label,
-              style: TextStyle(fontFamily: 'Inter', 
+              style: TextStyle(
+                fontFamily: 'Inter',
                 color: selected
                     ? Colors.white
                     : Colors.white.withOpacity(0.30),
@@ -970,12 +1012,15 @@ Future<void> _pickDateTime() async {
     return GestureDetector(
       onTap: _pickDateTime,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
           color: Colors.white.withOpacity(0.05),
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-              color: AppColors.niorRed.withOpacity(0.25), width: 0.8),
+            color: AppColors.niorRed.withOpacity(0.25),
+            width: 0.8,
+          ),
         ),
         child: Row(
           children: [
@@ -986,15 +1031,23 @@ Future<void> _pickDateTime() async {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(_fmtDate(_selectedDateTime),
-                      style: const TextStyle(fontFamily: 'Inter', 
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600)),
-                  Text('in ${_fmtCountdown(_selectedDateTime)}',
-                      style: TextStyle(fontFamily: 'Inter', 
-                          color: Colors.white.withOpacity(0.30),
-                          fontSize: 10)),
+                  Text(
+                    _fmtDate(_selectedDateTime),
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    'in ${_fmtCountdown(_selectedDateTime)}',
+                    style: TextStyle(
+                      fontFamily: 'Inter',
+                      color: Colors.white.withOpacity(0.30),
+                      fontSize: 10,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -1006,7 +1059,7 @@ Future<void> _pickDateTime() async {
     );
   }
 
-  // ── LINK PANEL ─────────────────────────────────────────────────────────────
+  // ── Link panel ─────────────────────────────────────────────────────────────
   Widget _buildLinkPanel() {
     final room = _createdRoom!;
     return Padding(
@@ -1026,7 +1079,9 @@ Future<void> _pickDateTime() async {
                   color: Colors.white.withOpacity(0.06),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                      color: Colors.white.withOpacity(0.10), width: 0.8),
+                    color: Colors.white.withOpacity(0.10),
+                    width: 0.8,
+                  ),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1034,34 +1089,44 @@ Future<void> _pickDateTime() async {
                     Row(
                       children: [
                         Container(
-                          width: 6, height: 6,
+                          width: 6,
+                          height: 6,
                           decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: AppColors.success),
+                            shape: BoxShape.circle,
+                            color: AppColors.success,
+                          ),
                         ),
                         const SizedBox(width: 8),
-                        Text('ROOM CREATED',
-                            style: TextStyle(fontFamily: 'Inter', 
-                                color: AppColors.success,
-                                fontSize: 9,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 2.0)),
+                        Text(
+                          'ROOM CREATED',
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            color: AppColors.success,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 2.0,
+                          ),
+                        ),
                         const Spacer(),
                         Text(
                           'Starts in ${_fmtCountdown(room.scheduledAt)}',
-                          style: const TextStyle(fontFamily: 'Inter',
-                              color: AppColors.accentGold,
-                              fontSize: 10),
+                          style: const TextStyle(
+                            fontFamily: 'Inter',
+                            color: AppColors.accentGold,
+                            fontSize: 10,
+                          ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 14),
                     Text(
                       room.shareableLink,
-                      style: const TextStyle(fontFamily: 'Inter',
-                          color: AppColors.silver,
-                          fontSize: 11,
-                          height: 1.5),
+                      style: TextStyle(
+                        fontFamily: 'Inter',
+                        color: Colors.white.withOpacity(0.40),
+                        fontSize: 11,
+                        height: 1.5,
+                      ),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 14),
@@ -1109,7 +1174,9 @@ Future<void> _pickDateTime() async {
                   color: Colors.white.withOpacity(0.06),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                      color: Colors.white.withOpacity(0.10), width: 0.8),
+                    color: Colors.white.withOpacity(0.10),
+                    width: 0.8,
+                  ),
                 ),
                 child: Column(
                   children: [
@@ -1130,8 +1197,10 @@ Future<void> _pickDateTime() async {
             width: double.infinity,
             height: 52,
             child: GestureDetector(
-              onTap: () =>
-                  Navigator.popUntil(context, (r) => r.isFirst),
+              onTap: () {
+                ref.invalidate(scheduledRoomsProvider);
+                Navigator.popUntil(context, (r) => r.isFirst);
+              },
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
                 child: BackdropFilter(
@@ -1144,7 +1213,8 @@ Future<void> _pickDateTime() async {
                     child: const Center(
                       child: Text(
                         'DONE',
-                        style: TextStyle(fontFamily: 'BebasNeue',
+                        style: TextStyle(
+                          fontFamily: 'BebasNeue',
                           color: Colors.black,
                           fontSize: 16,
                           fontWeight: FontWeight.normal,
@@ -1173,7 +1243,8 @@ Future<void> _pickDateTime() async {
       ),
       child: Text(
         label,
-        style: TextStyle(fontFamily: 'Inter', 
+        style: TextStyle(
+          fontFamily: 'Inter',
           color: c,
           fontSize: 9,
           fontWeight: FontWeight.w800,
@@ -1190,11 +1261,7 @@ Future<void> _pickDateTime() async {
     required bool filled,
     bool success = false,
   }) {
-    final c = success
-        ? AppColors.success
-        : filled
-            ? Colors.grey
-            : Colors.grey;
+    final c = success ? AppColors.success : Colors.white.withOpacity(0.60);
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -1207,22 +1274,27 @@ Future<void> _pickDateTime() async {
               : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-              color: success
-                  ? AppColors.success.withOpacity(0.28)
-                  : Colors.white.withOpacity(0.10),
-              width: 0.8),
+            color: success
+                ? AppColors.success.withOpacity(0.28)
+                : Colors.white.withOpacity(0.10),
+            width: 0.8,
+          ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(icon, color: c, size: 13),
             const SizedBox(width: 6),
-            Text(label,
-                style: TextStyle(fontFamily: 'Inter', 
-                    color: c,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.2)),
+            Text(
+              label,
+              style: TextStyle(
+                fontFamily: 'Inter',
+                color: c,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.2,
+              ),
+            ),
           ],
         ),
       ),
@@ -1234,23 +1306,30 @@ Future<void> _pickDateTime() async {
       padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         children: [
-          Text(label,
-              style: const TextStyle(fontFamily: 'Inter',
-                color: Colors.grey,
-                fontSize: 9,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.8,
-              )),
+          Text(
+            label,
+            style: TextStyle(
+              fontFamily: 'Inter',
+              color: Colors.white.withOpacity(0.22),
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.8,
+            ),
+          ),
           const Spacer(),
           Flexible(
-            child: Text(value,
-                style: const TextStyle(fontFamily: 'Inter',
-                    color:AppColors.accentGold,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500),
-                textAlign: TextAlign.right,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis),
+            child: Text(
+              value,
+              style: const TextStyle(
+                fontFamily: 'Inter',
+                color: AppColors.accentGold,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.right,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ],
       ),
@@ -1260,8 +1339,11 @@ Future<void> _pickDateTime() async {
   Widget _posterPh() => Container(
         color: const Color(0xFF1A1A1A),
         child: Center(
-          child: Icon(Icons.movie_rounded,
-              size: 48, color: Colors.white.withOpacity(0.06)),
+          child: Icon(
+            Icons.movie_rounded,
+            size: 48,
+            color: Colors.white.withOpacity(0.06),
+          ),
         ),
       );
 
@@ -1273,8 +1355,10 @@ Future<void> _pickDateTime() async {
     final h = dt.hour.toString().padLeft(2, '0');
     final m = dt.minute.toString().padLeft(2, '0');
     if (today) return 'Today $h:$m';
-    const mo = ['','Jan','Feb','Mar','Apr','May','Jun',
-                 'Jul','Aug','Sep','Oct','Nov','Dec'];
+    const mo = [
+      '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
     return '${mo[dt.month]} ${dt.day}  $h:$m';
   }
 
