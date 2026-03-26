@@ -671,26 +671,77 @@ class _RoomVideoPickerScreenState extends ConsumerState<RoomVideoPickerScreen>
         ),
       );
 
-  Widget _buildEmpty() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.video_library_outlined,
-              size: 48, color: Colors.white.withOpacity(0.10)),
-          const SizedBox(height: 14),
-          Text(
-            _searchQuery.isNotEmpty
-                ? 'No results for "$_searchQuery"'
-                : 'No videos here',
-            style: TextStyle(fontFamily: 'Inter', 
-                color: Colors.white.withOpacity(0.25), fontSize: 14),
+Widget _buildEmpty() {
+    return Stack(
+      children: [
+        Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.video_library_outlined,
+                  size: 48, color: Colors.white.withOpacity(0.10)),
+              const SizedBox(height: 14),
+              Text(
+                _searchQuery.isNotEmpty
+                    ? 'No results for "$_searchQuery"'
+                    : 'No videos here',
+                style: TextStyle(fontFamily: 'Inter',
+                    color: Colors.white.withOpacity(0.25), fontSize: 14),
+              ),
+              if (_searchQuery.isNotEmpty) ...[
+                const SizedBox(height: 20),
+                GestureDetector(
+                  onTap: () => setState(() {
+                    _searchController.clear();
+                    _searchQuery = '';
+                    _showSearch = false;
+                  }),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.06),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                          color: Colors.white.withOpacity(0.10), width: 0.8),
+                    ),
+                    child: Text('Clear search',
+                        style: TextStyle(fontFamily: 'Inter',
+                            color: Colors.white.withOpacity(0.40),
+                            fontSize: 13)),
+                  ),
+                ),
+              ],
+            ],
           ),
-        ],
-      ),
+        ),
+        // Back button always visible
+        Positioned(
+          top: MediaQuery.of(context).padding.top + 12,
+          left: 20,
+          child: GestureDetector(
+            onTap: () => Navigator.pop(context),
+            child: ClipOval(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  width: 42, height: 42,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withOpacity(0.10),
+                    border: Border.all(
+                        color: Colors.white.withOpacity(0.15), width: 0.8),
+                  ),
+                  child: const Icon(Icons.arrow_back_ios_new_rounded,
+                      color: Colors.white, size: 18),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
-
   Widget _buildLoading() => Center(
         child: SizedBox(
           width: 18, height: 18,

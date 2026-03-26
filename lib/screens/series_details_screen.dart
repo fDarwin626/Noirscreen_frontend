@@ -14,16 +14,24 @@ class SeriesDetailScreen extends ConsumerWidget {
 
   const SeriesDetailScreen({super.key, required this.series});
 
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // Make status bar transparent so header bleeds into it
+@override
+Widget build(BuildContext context, WidgetRef ref) {
+  // use addPostFrameCallback so the SystemChrome call fires
+  // AFTER the frame is drawn, not during it. Calling it mid-build was
+  // causing a half-black overlay when returning from the video player
+  // because the system UI state was being changed while Flutter was
+  // already compositing the frame.
+  WidgetsBinding.instance.addPostFrameCallback((_) {
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
         statusBarIconBrightness: Brightness.light,
         statusBarBrightness: Brightness.dark,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarIconBrightness: Brightness.light,
       ),
     );
+  });
 
     final episodesAsync = ref.watch(episodesProvider(series.id));
     final statusBarHeight = MediaQuery.of(context).padding.top;

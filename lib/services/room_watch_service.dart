@@ -14,7 +14,7 @@ class RoomWatchService {
     required this.userId,
     required this.isOwner,
   });
-
+ 
   Future<void> connect({
     required void Function(int position) onPlay,
     required void Function(int position) onPause,
@@ -26,6 +26,10 @@ class RoomWatchService {
     required void Function(String userId) onMuted,
     required void Function(String userId) onKicked,
     required void Function() onRoomEnded,
+        required void Function(String fromUserId, Map<String, dynamic> sdp) onWebRTCOffer,
+    required void Function(String fromUserId, Map<String, dynamic> sdp) onWebRTCAnswer,
+    required void Function(String fromUserId, Map<String, dynamic> candidate) onWebRTCIce,
+    required void Function(String userId, String emoji) onReaction,
   }) async {
     try {
       _socket = IO.io(
@@ -116,6 +120,48 @@ class RoomWatchService {
       // Owner ended the room
       _socket!.on('room_ended', (_) => onRoomEnded());
 
+      // Sync state — fires when joiner first connects
+      // Server sends current position + isPlaying so joiner jumps to correct spot
+      _socket!.on('sync_state', (data) {
+        final pos = _safeInt(data['position']);
+        final isPlaying = data['isPlaying'] as bool? ?? false;
+        if (isPlaying) {
+          onPlay(pos);
+        } else {
+          onPause(pos);
+        }
+      });
+      
+      // WebRTC signaling events
+      _socket!.on('webrtc_offer', (data) {
+        final from = data['fromUserId'] as String? ?? '';
+        final sdp = Map<String, dynamic>.from(data['sdp'] ?? {});
+        if (from.isEmpty || sdp.isEmpty) return;
+        onWebRTCOffer(from, sdp);
+      });
+
+      _socket!.on('webrtc_answer', (data) {
+        final from = data['fromUserId'] as String? ?? '';
+        final sdp = Map<String, dynamic>.from(data['sdp'] ?? {});
+        if (from.isEmpty || sdp.isEmpty) return;
+        onWebRTCAnswer(from, sdp);
+      });
+
+      _socket!.on('webrtc_ice', (data) {
+        final from = data['fromUserId'] as String? ?? '';
+        final candidate = Map<String, dynamic>.from(data['candidate'] ?? {});
+        if (from.isEmpty || candidate.isEmpty) return;
+        onWebRTCIce(from, candidate);
+      });
+
+      // Reaction events
+      _socket!.on('reaction', (data) {
+        final uid = data['userId'] as String? ?? '';
+        final emoji = data['emoji'] as String? ?? '';
+        if (uid.isEmpty || emoji.isEmpty) return;
+        onReaction(uid, emoji);
+      });
+
     } catch (e) {
       print('❌ ROOM SERVICE: connect error - $e');
     }
@@ -190,6 +236,43 @@ class RoomWatchService {
     });
   }
 
+// WebRTC signaling senders
+  void sendWebRTCOffer({required String targetUserId, required Map<String, dynamic> sdp}) {
+    if (!_connected) return;
+    _socket!.emit('webrtc_offer', {
+      'roomId': roomId,
+      'targetUserId': targetUserId,
+      'sdp': sdp,
+    });
+  }
+
+  void sendWebRTCAnswer({required String targetUserId, required Map<String, dynamic> sdp}) {
+    if (!_connected) return;
+    _socket!.emit('webrtc_answer', {
+      'roomId': roomId,
+      'targetUserId': targetUserId,
+      'sdp': sdp,
+    });
+  }
+
+  void sendWebRTCIce({required String targetUserId, required Map<String, dynamic> candidate}) {
+    if (!_connected) return;
+    _socket!.emit('webrtc_ice', {
+      'roomId': roomId,
+      'targetUserId': targetUserId,
+      'candidate': candidate,
+    });
+  }
+
+  // Send reaction emoji to all room participants
+  void sendReaction(String emoji) {
+    if (!_connected) return;
+    _socket!.emit('reaction', {
+      'roomId': roomId,
+      'emoji': emoji,
+    });
+  }
+
   void disconnect() {
     if (_connected) {
       _socket!.emit('leave_room', {
@@ -201,6 +284,16 @@ class RoomWatchService {
     _socket?.dispose();
     _connected = false;
   }
+
+  // Called when navigating from waiting room → watch screen
+// Drops socket silently without emitting leave_room
+// so the server doesn't think the owner left and kill the room for guests
+void silentDisconnect() {
+  _socket?.disconnect();
+  _socket?.dispose();
+  _connected = false;
+}
+
 
   // Socket data can arrive as int, double or string — handle all
   int _safeInt(dynamic val) {

@@ -40,7 +40,7 @@ print('📹 MANAGER: Scanner found ${videos.length} videos');
       }
 
       // Step 3: Generate thumbnails
-      onProgress?.call('Generating thumbnails...', 50, 100);
+      onProgress?.call('Setting Up HomePage...', 50, 100);
       
       int thumbnailsGenerated = 0;
       for (int i = 0; i < videos.length; i++) {

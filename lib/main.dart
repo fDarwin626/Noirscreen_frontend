@@ -6,12 +6,32 @@ import 'package:noirscreen/constants/app_colors.dart';
 import 'package:noirscreen/screens/splash_screen.dart';
 import 'package:noirscreen/screens/home_screen.dart';
 import 'package:noirscreen/screens/room_watch_screen.dart';
+import 'package:noirscreen/screens/waiting_room_screen.dart';
 import 'package:noirscreen/services/rooms_service.dart';
 import 'package:noirscreen/services/auth_service.dart';
 import 'package:noirscreen/services/api_services.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // BUG 3 FIX: make the app draw edge-to-edge so our bottom nav bar sits
+  // ABOVE the system navigation bar (circle/square/triangle buttons) instead
+  // of being hidden behind it. Flutter will report the correct bottom inset
+  // via MediaQuery.padding.bottom so our nav bar padding adjusts automatically.
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    // Transparent nav bar so our dark bottom nav shows through cleanly
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarDividerColor: Colors.transparent,
+    systemNavigationBarIconBrightness: Brightness.light,
+  ));
+
+  // Tell Android to draw behind the system bars (edge-to-edge)
+  SystemChrome.setEnabledSystemUIMode(
+    SystemUiMode.edgeToEdge,
+  );
+
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(
     const ProviderScope(
@@ -38,14 +58,12 @@ class _NoirScreenAppState extends State<NoirScreenApp> {
   }
 
   void _initDeepLinks() {
-    // Listen for links while app is already open
     _appLinks.uriLinkStream.listen((uri) {
       _handleDeepLink(uri);
     });
   }
 
   Future<void> _handleDeepLink(Uri uri) async {
-    // Only handle noirscreen://room/ROOM_ID
     if (uri.scheme != 'noirscreen' || uri.host != 'room') return;
 
     final roomId = uri.pathSegments.isNotEmpty ? uri.pathSegments.first : null;
@@ -58,42 +76,29 @@ class _NoirScreenAppState extends State<NoirScreenApp> {
       final authService = AuthService();
       final apiService = ApiService();
 
-      // Get current user
       final userId = await authService.getUserId();
-      if (userId == null) {
-        print('❌ DEEP LINK: No user logged in');
-        return;
-      }
+      if (userId == null) return;
       final user = await apiService.getUser(userId);
-      if (user == null) {
-        print('❌ DEEP LINK: Could not load user');
-        return;
-      }
+      if (user == null) return;
 
-      // Fetch room details from backend
       final link = 'noirscreen://room/$roomId';
       final room = await roomsService.joinViaLink(link);
-      if (room == null) {
-        print('❌ DEEP LINK: Room not found or expired');
+      if (room == null) return;
+
+      if (room.status != 'active') {
+        _navigatorKey.currentState?.push(MaterialPageRoute(
+          builder: (_) => WaitingRoomScreen(
+            room: room, currentUser: user, isOwner: false),
+        ));
         return;
       }
-
-      print('✅ DEEP LINK: Joining room ${room.videoTitle}');
-
-      // Navigate to watch screen as viewer
-      // Never owner from a link — owner always joins from their own room card
-      _navigatorKey.currentState?.push(
-        MaterialPageRoute(
-          builder: (_) => RoomWatchScreen(
-            room: room,
-            currentUser: user,
-            isOwner: false,
-            localFilePath: null,
-            hlsStreamUrl:
-                '${ApiService.baseUrl}/api/rooms/${room.roomId}/stream.m3u8',
-          ),
+      _navigatorKey.currentState?.push(MaterialPageRoute(
+        builder: (_) => RoomWatchScreen(
+          room: room, currentUser: user, isOwner: false,
+          localFilePath: null,
+          hlsStreamUrl: '${ApiService.baseUrl}/api/rooms/${room.roomId}/stream.m3u8',
         ),
-      );
+      ));
     } catch (e) {
       print('❌ DEEP LINK: Error handling link - $e');
     }

@@ -29,8 +29,8 @@ class UserModel {
       avatarType: json['avatar_type'],
       avatarId: json['avatar_id'],
       photoUrl: json['photo_url'],
-      createdAt: DateTime.parse(json['created_at']),
-      lastActive: DateTime.parse(json['last_active']),
+      createdAt: DateTime.parse(json['created_at'] ?? DateTime.now().toIso8601String()),
+      lastActive: DateTime.parse(json['last_active'] ?? json['created_at'] ?? DateTime.now().toIso8601String()),
       totalRoomsCreated: json['total_rooms_created'] ?? 0,
       totalWatchTime: json['total_watch_time'] ?? 0,
     );

@@ -1,7 +1,12 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/svg.dart';
+import 'package:http/http.dart' as http;
 import 'package:noirscreen/services/hls_chcncker_service.dart';
+import 'package:noirscreen/services/webrtc_service.dart';
 import 'package:video_player/video_player.dart';
 import 'dart:async';
 import 'dart:io';
@@ -29,7 +34,6 @@ class RoomParticipant {
   });
 }
 
-// ── Pending join request model (skeleton — wired when Discovery is built) ────
 class PendingJoinRequest {
   final String requestId;
   final String userId;
@@ -74,15 +78,10 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
 
   bool _showControls = true;
   bool _showAvatars = true;
-
-  // ── Same as normal player ─────────────────────────────────────────────────
   bool _isExpanded = false;
   bool _isLocked = false;
   bool _showLockBadge = false;
   Timer? _lockBadgeTimer;
-
-  // ── Dropdown state ────────────────────────────────────────────────────────
-  // false = main menu, true = pending requests panel
   bool _showDropdown = false;
   bool _showPendingRequests = false;
 
@@ -94,13 +93,28 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
 
   HlsChunkerService? _chunker;
 
+  WebRTCService? _webrtc;
+  bool _isMuted = false;
+
+  final List<_ReactionBubble> _activeReactions = [];
+
+  static const List<String> _reactionEmojis = [
+    'assets/reactions/react_heart.png',
+    'assets/reactions/react_laugh.png',
+    'assets/reactions/react_shocked.png',
+    'assets/reactions/react_fire.png',
+    'assets/reactions/react_clap.png',
+    'assets/reactions/react_cry.png',
+    'assets/reactions/react_starstruck.png',
+    'assets/reactions/react_skull.png',
+    'assets/reactions/react_eyes.png',
+    'assets/reactions/react_popcorn.png',
+  ];
+
   final List<RoomParticipant> _participants = [];
   final Map<String, AnimationController> _speakControllers = {};
-
-  // ── Pending requests (skeleton — populated when Discovery is built) ───────
   final List<PendingJoinRequest> _pendingRequests = [];
 
-  // ── Volume & Brightness ───────────────────────────────────────────────────
   double _volume = 15;
   double _brightness = 7;
   static const double _maxVolume = 30;
@@ -120,14 +134,19 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
       userId: widget.currentUser.userId,
       username: widget.currentUser.username,
       isOwner: widget.isOwner,
+      avatarPath: widget.currentUser.photoUrl,
     ));
 
-    _initVideo();
-    _initRoomService();
-    _resetHideControlsTimer();
+    print('🖼️ ROOM: currentUser photoUrl = ${widget.currentUser.photoUrl?.substring(0, 30)}');
+    print('🖼️ ROOM: avatarType = ${widget.currentUser.avatarType}');
+    print('🖼️ ROOM: avatarId = ${widget.currentUser.avatarId}');
+// Init video first, then room service
+// This ensures _videoController exists when sync_state fires
+_initVideo().then((_) => _initRoomService());
+_resetHideControlsTimer();
+
   }
 
-  // ── Security ───────────────────────────────────────────────────────────────
   bool _isValidPath(String path) {
     if (!path.startsWith('/')) return false;
     if (path.contains('..')) return false;
@@ -138,54 +157,58 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
   }
 
   bool _isValidStreamUrl(String url) {
-    return (url.startsWith('http://') || url.startsWith('https://'))
-        && url.contains('.m3u8');
+    return (url.startsWith('http://') || url.startsWith('https://')) &&
+        url.contains('.m3u8');
   }
 
-  // ── Init video ─────────────────────────────────────────────────────────────
   Future<void> _initVideo() async {
     try {
       VideoPlayerController controller;
 
       if (widget.localFilePath != null) {
         if (!_isValidPath(widget.localFilePath!)) {
-          if (mounted) setState(() {
-            _videoError = true;
-            _videoErrorMessage = 'Invalid file path: ${widget.localFilePath}';
-          });
+          if (mounted) setState(() { _videoError = true; _videoErrorMessage = 'Invalid file path: ${widget.localFilePath}'; });
           return;
         }
         final file = File(widget.localFilePath!);
         if (!await file.exists()) {
-          if (mounted) setState(() {
-            _videoError = true;
-            _videoErrorMessage = 'File not found: ${widget.localFilePath}';
-          });
+          if (mounted) setState(() { _videoError = true; _videoErrorMessage = 'File not found: ${widget.localFilePath}'; });
           return;
         }
         controller = VideoPlayerController.file(file);
       } else if (widget.hlsStreamUrl != null) {
         if (!_isValidStreamUrl(widget.hlsStreamUrl!)) {
+          if (mounted) setState(() { _videoError = true; _videoErrorMessage = 'Invalid stream URL: ${widget.hlsStreamUrl}'; });
+          return;
+        }
+        // Wait for HLS chunks to be available before initializing
+        // Retry up to 10 times with 3 second gaps (30 seconds total)
+        bool streamReady = false;
+        for (int attempt = 0; attempt < 10; attempt++) {
+          try {
+            final check = await http.get(Uri.parse(widget.hlsStreamUrl!))
+                .timeout(const Duration(seconds: 5));
+            if (check.statusCode == 200) {
+              streamReady = true;
+              break;
+            }
+          } catch (_) {}
+          if (!mounted) return;
+          print('⏳ ROOM WATCH: Stream not ready, waiting... attempt ${attempt + 1}');
+          await Future.delayed(const Duration(seconds: 3));
+        }
+        if (!streamReady) {
           if (mounted) setState(() {
             _videoError = true;
-            _videoErrorMessage = 'Invalid stream URL: ${widget.hlsStreamUrl}';
+            _videoErrorMessage = 'Stream not ready. Host may still be uploading.';
           });
           return;
         }
-        controller = VideoPlayerController.networkUrl(
-            Uri.parse(widget.hlsStreamUrl!));
+        controller = VideoPlayerController.networkUrl(Uri.parse(widget.hlsStreamUrl!));
       } else {
-        print('❌ ROOM WATCH: No video source');
-        print('   streamType: ${widget.room.streamType}');
-        print('   localFilePath: ${widget.localFilePath}');
-        print('   hlsStreamUrl: ${widget.hlsStreamUrl}');
-        print('   isOwner: ${widget.isOwner}');
         if (mounted) setState(() {
           _videoError = true;
-          _videoErrorMessage =
-              'No video source.\nType: ${widget.room.streamType}\n'
-              'localFile: ${widget.localFilePath ?? "null"}\n'
-              'hlsUrl: ${widget.hlsStreamUrl ?? "null"}';
+          _videoErrorMessage = 'No video source.\nType: ${widget.room.streamType}\nlocalFile: ${widget.localFilePath ?? "null"}\nhlsUrl: ${widget.hlsStreamUrl ?? "null"}';
         });
         return;
       }
@@ -193,42 +216,30 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
       _videoController = controller;
       await controller.initialize();
       controller.addListener(_onVideoUpdate);
-
-      // Apply initial volume
       await controller.setVolume(_volume / _maxVolume);
 
       if (widget.isOwner) {
         await controller.play();
-
-        // Start HLS chunking for audio and hls — not needed for sync
-        if (widget.room.streamType == 'audio' ||
-            widget.room.streamType == 'hls') {
+        if (widget.room.streamType == 'audio' || widget.room.streamType == 'hls') {
           _chunker = HlsChunkerService();
           _chunker!.start(
             videoPath: widget.localFilePath!,
             roomId: widget.room.roomId,
             onError: (error) => print('❌ CHUNKER: $error'),
           );
-          print('✅ ROOM WATCH: HLS chunker started');
         }
       } else {
         await controller.pause();
       }
 
       if (mounted) setState(() => _videoInitialized = true);
-
-      _progressTimer = Timer.periodic(
-          const Duration(seconds: 5), (_) => _saveProgress());
+      _progressTimer = Timer.periodic(const Duration(seconds: 5), (_) => _saveProgress());
     } catch (e) {
       print('❌ ROOM WATCH: Video init error - $e');
-      if (mounted) setState(() {
-        _videoError = true;
-        _videoErrorMessage = 'Video error: $e';
-      });
+      if (mounted) setState(() { _videoError = true; _videoErrorMessage = 'Video error: $e'; });
     }
   }
 
-  // ── Init socket ────────────────────────────────────────────────────────────
   Future<void> _initRoomService() async {
     final service = RoomWatchService(
       roomId: widget.room.roomId,
@@ -255,8 +266,10 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
       },
       onParticipantJoined: (uid, uname, avatar) {
         if (!mounted) return;
-        _addParticipant(RoomParticipant(
-            userId: uid, username: uname, avatarPath: avatar));
+        _addParticipant(RoomParticipant(userId: uid, username: uname, avatarPath: avatar));
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) _webrtc?.createOffer(uid);
+        });
       },
       onParticipantLeft: (uid) {
         if (!mounted) return;
@@ -272,12 +285,8 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
           final idx = _participants.indexWhere((p) => p.userId == uid);
           if (idx == -1) return;
           _participants[idx].isSpeaking = speaking;
-          if (speaking) {
-            _speakControllers[uid]?.repeat();
-          } else {
-            _speakControllers[uid]?.stop();
-            _speakControllers[uid]?.reset();
-          }
+          if (speaking) { _speakControllers[uid]?.repeat(); }
+          else { _speakControllers[uid]?.stop(); _speakControllers[uid]?.reset(); }
         });
       },
       onMuted: (uid) {
@@ -288,21 +297,53 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
         });
       },
       onKicked: (uid) {
-        if (uid == widget.currentUser.userId && mounted) {
-          _showKickedDialog();
-        }
+        if (uid == widget.currentUser.userId && mounted) _showKickedDialog();
       },
       onRoomEnded: () {
         if (mounted) _showRoomEndedDialog();
       },
+      onWebRTCOffer: (fromUserId, sdp) async {
+        await _webrtc?.handleOffer(fromUserId, sdp);
+      },
+      onWebRTCAnswer: (fromUserId, sdp) async {
+        await _webrtc?.handleAnswer(fromUserId, sdp);
+      },
+      onWebRTCIce: (fromUserId, candidate) async {
+        await _webrtc?.handleIceCandidate(fromUserId, candidate);
+      },
+      onReaction: (uid, emoji) {
+        if (!mounted) return;
+        _addReactionBubble(uid, emoji);
+      },
     );
 
     if (mounted) {
+  // Initialize WebRTC FIRST before setting state
+  // This guarantees _webrtc is never null when onParticipantJoined fires
+  _webrtc = WebRTCService(
+    localUserId: widget.currentUser.userId,
+    watchService: service,
+    onSpeakingChanged: (uid, speaking) {
+      if (!mounted) return;
       setState(() {
-        _watchService = service;
-        _serviceConnected = true;
+        final idx = _participants.indexWhere((p) => p.userId == uid);
+        if (idx == -1) return;
+        _participants[idx].isSpeaking = speaking;
+        if (speaking) _speakControllers[uid]?.repeat();
+        else { _speakControllers[uid]?.stop(); _speakControllers[uid]?.reset(); }
       });
-    }
+    },
+    onPeerDisconnected: (uid) => print('📡 WEBRTC: Peer $uid disconnected'),
+  );
+  await _webrtc!.initialize();
+
+  // Only mark service ready AFTER webrtc is initialized
+  // So any participant_joined events that fire now will have _webrtc ready
+  setState(() {
+    _watchService = service;
+    _serviceConnected = true;
+  });
+}
   }
 
   void _addParticipant(RoomParticipant p) {
@@ -316,9 +357,7 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
     });
   }
 
-  void _onVideoUpdate() {
-    if (mounted) setState(() {});
-  }
+  void _onVideoUpdate() { if (mounted) setState(() {}); }
 
   void _saveProgress() {
     final pos = _videoController?.value.position.inSeconds ?? 0;
@@ -337,10 +376,7 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
   }
 
   void _onScreenTap() {
-    if (_isLocked) {
-      _showLockBadgeTemporarily();
-      return;
-    }
+    if (_isLocked) { _showLockBadgeTemporarily(); return; }
     setState(() => _showControls = !_showControls);
     if (_showControls) _resetHideControlsTimer();
   }
@@ -353,7 +389,6 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
     });
   }
 
-  // ── Volume/brightness drag ─────────────────────────────────────────────────
   void _onVolumeDrag(DragUpdateDetails d) {
     final delta = -d.delta.dy * (_maxVolume / 200);
     setState(() => _volume = (_volume + delta).clamp(0, _maxVolume));
@@ -418,21 +453,64 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
     });
   }
 
-  // ── Pending request actions (skeleton) ────────────────────────────────────
+  void _toggleMute() {
+    setState(() => _isMuted = !_isMuted);
+    _webrtc?.setMuted(_isMuted);
+  }
+
   void _acceptRequest(PendingJoinRequest req) {
-    // TODO: wire to Discovery backend when built
-    // _watchService?.sendJoinApproval(req.requestId, req.userId);
     setState(() => _pendingRequests.removeWhere((r) => r.requestId == req.requestId));
-    print('✅ ROOM: Accepted ${req.username}');
   }
 
   void _rejectRequest(PendingJoinRequest req) {
-    // TODO: wire to Discovery backend when built
-    // _watchService?.sendJoinRejection(req.requestId, req.userId);
     setState(() => _pendingRequests.removeWhere((r) => r.requestId == req.requestId));
-    print('❌ ROOM: Rejected ${req.username}');
   }
 
+  void _addReactionBubble(String userId, String emoji) {
+    final id = '${userId}_${DateTime.now().millisecondsSinceEpoch}';
+    final ctrl = AnimationController(
+      duration: const Duration(milliseconds: 2500),
+      vsync: this,
+    );
+    final fadeAnim = Tween<double>(begin: 1.0, end: 0.0).animate(
+      CurvedAnimation(parent: ctrl, curve: const Interval(0.6, 1.0, curve: Curves.easeOut)),
+    );
+    final slideAnim = Tween<Offset>(
+      begin: Offset.zero,
+      end: const Offset(0, -1.5),
+    ).animate(CurvedAnimation(parent: ctrl, curve: Curves.easeOut));
+
+    final username = _participants
+        .firstWhere((p) => p.userId == userId, orElse: () => RoomParticipant(userId: userId, username: 'User'))
+        .username;
+
+    final bubble = _ReactionBubble(
+      userId: userId, username: username, emoji: emoji,
+      id: id, controller: ctrl, fadeAnim: fadeAnim, slideAnim: slideAnim,
+    );
+
+    setState(() => _activeReactions.add(bubble));
+
+    ctrl.forward().then((_) {
+      if (mounted) {
+        setState(() => _activeReactions.removeWhere((r) => r.id == id));
+        ctrl.dispose();
+      }
+    });
+  }
+
+void _sendReaction(String emojiAssetPath) {
+  print('🎯 REACTION: tapped $emojiAssetPath — service=${_watchService != null}');
+  if (_watchService == null || !_serviceConnected) {
+    print('⚠️ REACTION: service not ready, skipping');
+    return;
+  }
+  // Only emit to server — server broadcasts back to ALL including sender
+  // NOT added locally here — wait for server echo via onReaction callback
+  // This prevents sender seeing it twice AND ensures all users see it once
+  _watchService!.sendReaction(emojiAssetPath);
+  _resetHideControlsTimer();
+}  
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
@@ -449,12 +527,12 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
     _videoController?.removeListener(_onVideoUpdate);
     _videoController?.dispose();
     for (final c in _speakControllers.values) c.dispose();
-    _watchService?.disconnect();
+    _watchService?.silentDisconnect();
     _chunker?.stop();
+    _webrtc?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-    SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.manual, overlays: SystemUiOverlay.values);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
     super.dispose();
   }
 
@@ -479,7 +557,6 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
           children: [
             _buildVideoSurface(),
 
-            // Brightness drag zone — left third
             Positioned(
               left: 0, top: 0, bottom: 0,
               width: MediaQuery.of(context).size.width / 3,
@@ -491,7 +568,6 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
               ),
             ),
 
-            // Volume drag zone — right third
             Positioned(
               right: 0, top: 0, bottom: 0,
               width: MediaQuery.of(context).size.width / 3,
@@ -506,52 +582,50 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
             if (_showControls && _videoInitialized && !_videoError && !_isLocked)
               _buildControlsOverlay(),
 
-            // Volume cylinder
             if (_showControls && _videoInitialized && !_videoError && !_isLocked)
               _buildVolumeCylinder(screenHeight),
 
-            // Brightness cylinder
             if (_showControls && _videoInitialized && !_videoError && !_isLocked)
               _buildBrightnessCylinder(screenHeight),
 
-            if (_showAvatars && _participants.isNotEmpty)
-              _buildAvatarPanel(),
+            if (_showAvatars && _participants.isNotEmpty) _buildAvatarPanel(),
 
-            if (_videoInitialized && !_videoError)
-              _buildAvatarToggle(),
+            if (_videoInitialized && !_videoError) _buildAvatarToggle(),
 
-            if (!_videoInitialized && !_videoError)
-              _buildLoadingOverlay(),
+            if (!_videoInitialized && !_videoError) _buildLoadingOverlay(),
 
             if (_videoError) _buildErrorOverlay(),
 
-            if (!_serviceConnected && !_videoError)
-              _buildConnectingBadge(),
+            if (!_serviceConnected && !_videoError) _buildConnectingBadge(),
 
             if (_isLocked && _showLockBadge) _buildLockOverlay(),
 
             if (_showDropdown && !_isLocked) _buildDropdownMenu(),
+
+            ..._activeReactions.map((r) => _buildReactionBubble(r)),
+
+            if (_showControls && _videoInitialized && !_videoError && !_isLocked)
+              _buildReactionBar(),
+
+            if (_videoInitialized && !_videoError && !_isLocked)
+              _buildMuteButton(),
           ],
         ),
       ),
     );
   }
 
-  // ── Volume cylinder ────────────────────────────────────────────────────────
   Widget _buildVolumeCylinder(double screenHeight) {
     final fillFraction = _volume / _maxVolume;
     final cylinderHeight = screenHeight * 0.35;
     final filledHeight = cylinderHeight * fillFraction;
-
     return Positioned(
-      right: 12,
-      top: (screenHeight - cylinderHeight) / 2,
+      right: 12, top: (screenHeight - cylinderHeight) / 2,
       child: AnimatedOpacity(
         opacity: _showControls ? 1.0 : 0.0,
         duration: const Duration(milliseconds: 300),
         child: Container(
-          width: 36,
-          height: cylinderHeight,
+          width: 36, height: cylinderHeight,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(18),
             color: Colors.white.withOpacity(0.10),
@@ -563,34 +637,18 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
               alignment: Alignment.bottomCenter,
               children: [
                 Positioned(
-                  bottom: 0, left: 0, right: 0,
-                  height: filledHeight,
+                  bottom: 0, left: 0, right: 0, height: filledHeight,
                   child: Container(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
+                        begin: Alignment.bottomCenter, end: Alignment.topCenter,
                         colors: [AppColors.niorRed, AppColors.niorRed.withOpacity(0.7)],
                       ),
                     ),
                   ),
                 ),
-                Center(
-                  child: Text(
-                    _volume.toInt().toString(),
-                    style: const TextStyle(
-                      fontFamily: 'Inter', color: Colors.white,
-                      fontSize: 11, fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  top: 8,
-                  child: Icon(
-                    _volume == 0 ? Icons.volume_off_rounded : Icons.volume_up_rounded,
-                    color: Colors.white.withOpacity(0.7), size: 14,
-                  ),
-                ),
+                Center(child: Text(_volume.toInt().toString(), style: const TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
+                Positioned(top: 8, child: Icon(_volume == 0 ? Icons.volume_off_rounded : Icons.volume_up_rounded, color: Colors.white.withOpacity(0.7), size: 14)),
               ],
             ),
           ),
@@ -599,21 +657,17 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
     );
   }
 
-  // ── Brightness cylinder ────────────────────────────────────────────────────
   Widget _buildBrightnessCylinder(double screenHeight) {
     final fillFraction = _brightness / _maxBrightness;
     final cylinderHeight = screenHeight * 0.35;
     final filledHeight = cylinderHeight * fillFraction;
-
     return Positioned(
-      left: 12,
-      top: (screenHeight - cylinderHeight) / 2,
+      left: 12, top: (screenHeight - cylinderHeight) / 2,
       child: AnimatedOpacity(
         opacity: _showControls ? 1.0 : 0.0,
         duration: const Duration(milliseconds: 300),
         child: Container(
-          width: 36,
-          height: cylinderHeight,
+          width: 36, height: cylinderHeight,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(18),
             color: Colors.white.withOpacity(0.10),
@@ -625,34 +679,18 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
               alignment: Alignment.bottomCenter,
               children: [
                 Positioned(
-                  bottom: 0, left: 0, right: 0,
-                  height: filledHeight,
+                  bottom: 0, left: 0, right: 0, height: filledHeight,
                   child: Container(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
+                        begin: Alignment.bottomCenter, end: Alignment.topCenter,
                         colors: [AppColors.niorRed, AppColors.niorRed.withOpacity(0.7)],
                       ),
                     ),
                   ),
                 ),
-                Center(
-                  child: Text(
-                    _brightness.toInt().toString(),
-                    style: const TextStyle(
-                      fontFamily: 'Inter', color: Colors.white,
-                      fontSize: 11, fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  top: 8,
-                  child: Icon(
-                    Icons.brightness_6_rounded,
-                    color: Colors.white.withOpacity(0.7), size: 14,
-                  ),
-                ),
+                Center(child: Text(_brightness.toInt().toString(), style: const TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
+                Positioned(top: 8, child: Icon(Icons.brightness_6_rounded, color: Colors.white.withOpacity(0.7), size: 14)),
               ],
             ),
           ),
@@ -661,42 +699,24 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
     );
   }
 
-  // ── Video surface ──────────────────────────────────────────────────────────
   Widget _buildVideoSurface() {
-    if (!_videoInitialized || _videoController == null) {
-      return Container(color: Colors.black);
-    }
+    if (!_videoInitialized || _videoController == null) return Container(color: Colors.black);
     return LayoutBuilder(builder: (context, constraints) {
       final sw = constraints.maxWidth;
       final sh = constraints.maxHeight;
       final va = _videoController!.value.aspectRatio;
-
       if (_isExpanded) {
-        return SizedBox(
-          width: sw, height: sh,
-          child: FittedBox(
-            fit: BoxFit.cover,
-            child: SizedBox(
-              width: sw, height: sw / va,
-              child: VideoPlayer(_videoController!),
-            ),
-          ),
-        );
+        return SizedBox(width: sw, height: sh,
+          child: FittedBox(fit: BoxFit.cover,
+            child: SizedBox(width: sw, height: sw / va, child: VideoPlayer(_videoController!))));
       }
-
-      double vw = sw;
-      double vh = sw / va;
+      double vw = sw; double vh = sw / va;
       if (vh > sh) { vh = sh; vw = sh * va; }
-      return Container(
-        color: Colors.black,
-        child: Center(
-          child: SizedBox(width: vw, height: vh, child: VideoPlayer(_videoController!)),
-        ),
-      );
+      return Container(color: Colors.black,
+        child: Center(child: SizedBox(width: vw, height: vh, child: VideoPlayer(_videoController!))));
     });
   }
 
-  // ── Controls overlay ───────────────────────────────────────────────────────
   Widget _buildControlsOverlay() {
     final ctrl = _videoController!;
     final pos = ctrl.value.position;
@@ -709,20 +729,13 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
       child: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Colors.black.withOpacity(0.65),
-              Colors.transparent,
-              Colors.transparent,
-              Colors.black.withOpacity(0.75),
-            ],
+            begin: Alignment.topCenter, end: Alignment.bottomCenter,
+            colors: [Colors.black.withOpacity(0.65), Colors.transparent, Colors.transparent, Colors.black.withOpacity(0.75)],
             stops: const [0.0, 0.18, 0.72, 1.0],
           ),
         ),
         child: Stack(
           children: [
-            // ── Top bar ────────────────────────────────────────────
             Positioned(
               top: 16, left: 12, right: 16,
               child: Row(
@@ -730,160 +743,70 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
                   _glassBtn(icon: Icons.arrow_back_ios_new_rounded, onTap: _confirmLeave),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.room.videoTitle,
-                          style: const TextStyle(
-                            fontFamily: 'BebasNeue', color: Colors.white,
-                            fontSize: 18, letterSpacing: 1,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        Text(
-                          _streamTypeLabel(widget.room.streamType),
-                          style: TextStyle(
-                            fontFamily: 'Inter',
-                            color: Colors.white.withOpacity(0.35),
-                            fontSize: 10,
-                          ),
-                        ),
-                      ],
-                    ),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(widget.room.videoTitle, style: const TextStyle(fontFamily: 'BebasNeue', color: Colors.white, fontSize: 18, letterSpacing: 1), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      Text(_streamTypeLabel(widget.room.streamType), style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.35), fontSize: 10)),
+                    ]),
                   ),
                   _participantBadge(),
                   const SizedBox(width: 8),
-                  // Fill/fit toggle
-                  _glassBtn(
-                    icon: _isExpanded
-                        ? Icons.fullscreen_exit_rounded
-                        : Icons.fullscreen_rounded,
-                    onTap: () {
-                      setState(() => _isExpanded = !_isExpanded);
-                      _resetHideControlsTimer();
-                    },
-                  ),
+                  _glassBtn(icon: _isExpanded ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded, onTap: () { setState(() => _isExpanded = !_isExpanded); _resetHideControlsTimer(); }),
                   const SizedBox(width: 8),
-                  // Three dots dropdown
-                  _glassBtn(
-                    icon: Icons.more_horiz_rounded,
-                    onTap: () {
-                      setState(() {
-                        _showDropdown = !_showDropdown;
-                        _showPendingRequests = false;
-                      });
-                      _hideControlsTimer?.cancel();
-                    },
-                  ),
+                  _glassBtn(icon: Icons.more_horiz_rounded, onTap: () { setState(() { _showDropdown = !_showDropdown; _showPendingRequests = false; }); _hideControlsTimer?.cancel(); }),
                   if (widget.isOwner) ...[
                     const SizedBox(width: 8),
-                    _glassBtn(
-                      icon: Icons.stop_circle_outlined,
-                      onTap: _stopRoom,
-                      color: AppColors.error,
-                    ),
+                    _glassBtn(icon: Icons.stop_circle_outlined, onTap: _stopRoom, color: AppColors.error),
                   ],
                 ],
               ),
             ),
 
-            // ── Center: owner controls / viewer label ──────────────
             if (widget.isOwner)
               Center(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _centerBtn(icon: Icons.replay_10_rounded, onTap: _seekBackward),
-                    const SizedBox(width: 36),
-                    GestureDetector(
-                      onTap: playing ? _pause : _play,
-                      child: Container(
-                        width: 60, height: 60,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white.withOpacity(0.15),
-                          border: Border.all(color: Colors.white.withOpacity(0.3), width: 0.8),
-                        ),
-                        child: Icon(
-                          playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                          color: Colors.white, size: 32,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 36),
-                    _centerBtn(icon: Icons.forward_10_rounded, onTap: _seekForward),
-                  ],
-                ),
+                child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  _centerBtn(icon: Icons.replay_10_rounded, onTap: _seekBackward),
+                  const SizedBox(width: 36),
+                  GestureDetector(
+                    onTap: playing ? _pause : _play,
+                    child: Container(width: 60, height: 60,
+                      decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withOpacity(0.15), border: Border.all(color: Colors.white.withOpacity(0.3), width: 0.8)),
+                      child: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded, color: Colors.white, size: 32)),
+                  ),
+                  const SizedBox(width: 36),
+                  _centerBtn(icon: Icons.forward_10_rounded, onTap: _seekForward),
+                ]),
               ),
 
             if (!widget.isOwner)
               Center(
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.45),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8),
-                  ),
-                  child: Text(
-                    'Controlled by host',
-                    style: TextStyle(
-                      fontFamily: 'Inter',
-                      color: Colors.white.withOpacity(0.40),
-                      fontSize: 11,
-                    ),
-                  ),
+                  decoration: BoxDecoration(color: Colors.black.withOpacity(0.45), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8)),
+                  child: Text('Controlled by host', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.40), fontSize: 11)),
                 ),
               ),
 
-            // ── Progress bar ───────────────────────────────────────
             Positioned(
               left: 16, right: 16, bottom: 20,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      thumbShape: widget.isOwner
-                          ? const RoundSliderThumbShape(enabledThumbRadius: 6)
-                          : const RoundSliderThumbShape(enabledThumbRadius: 0),
-                      trackHeight: 2.5,
-                      activeTrackColor: AppColors.niorRed,
-                      inactiveTrackColor: Colors.white.withOpacity(0.15),
-                      thumbColor: Colors.white,
-                      overlayColor: AppColors.niorRed.withOpacity(0.15),
-                    ),
-                    child: Slider(
-                      value: dur.inSeconds > 0
-                          ? pos.inSeconds.clamp(0, dur.inSeconds).toDouble()
-                          : 0.0,
-                      min: 0,
-                      max: dur.inSeconds > 0 ? dur.inSeconds.toDouble() : 1.0,
-                      onChanged: widget.isOwner
-                          ? (val) {
-                              final p = Duration(seconds: val.toInt());
-                              _videoController!.seekTo(p);
-                              _watchService?.sendSeek(val.toInt());
-                              _resetHideControlsTimer();
-                            }
-                          : null,
-                    ),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    thumbShape: widget.isOwner ? const RoundSliderThumbShape(enabledThumbRadius: 6) : const RoundSliderThumbShape(enabledThumbRadius: 0),
+                    trackHeight: 2.5, activeTrackColor: AppColors.niorRed,
+                    inactiveTrackColor: Colors.white.withOpacity(0.15),
+                    thumbColor: Colors.white, overlayColor: AppColors.niorRed.withOpacity(0.15),
                   ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(_fmt(pos),
-                          style: TextStyle(fontFamily: 'Inter',
-                              color: Colors.white.withOpacity(0.7), fontSize: 11)),
-                      Text(_fmt(dur),
-                          style: TextStyle(fontFamily: 'Inter',
-                              color: Colors.white.withOpacity(0.30), fontSize: 11)),
-                    ],
+                  child: Slider(
+                    value: dur.inSeconds > 0 ? pos.inSeconds.clamp(0, dur.inSeconds).toDouble() : 0.0,
+                    min: 0, max: dur.inSeconds > 0 ? dur.inSeconds.toDouble() : 1.0,
+                    onChanged: widget.isOwner ? (val) { final p = Duration(seconds: val.toInt()); _videoController!.seekTo(p); _watchService?.sendSeek(val.toInt()); _resetHideControlsTimer(); } : null,
                   ),
-                ],
-              ),
+                ),
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  Text(_fmt(pos), style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.7), fontSize: 11)),
+                  Text(_fmt(dur), style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.30), fontSize: 11)),
+                ]),
+              ]),
             ),
           ],
         ),
@@ -894,14 +817,12 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
   String _streamTypeLabel(String type) {
     switch (type) {
       case 'audio': return 'Audio Stream';
-      case 'hls':   return 'Video Stream';
-      case 'sync':  return 'Sync Watch';
-      default:      return 'Stream';
+      case 'hls': return 'Video Stream';
+      case 'sync': return 'Sync Watch';
+      default: return 'Stream';
     }
   }
 
-  // ── Dropdown menu ─────────────────────────────────────────────────────────
-  // Animates between main menu and pending requests panel
   Widget _buildDropdownMenu() {
     return Positioned(
       top: 60, right: 12,
@@ -911,16 +832,10 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
           filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
           child: Container(
             width: 220,
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.80),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8),
-            ),
+            decoration: BoxDecoration(color: Colors.black.withOpacity(0.80), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8)),
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 250),
-              child: _showPendingRequests
-                  ? _buildPendingRequestsPanel()
-                  : _buildMainDropdownItems(),
+              child: _showPendingRequests ? _buildPendingRequestsPanel() : _buildMainDropdownItems(),
             ),
           ),
         ),
@@ -928,278 +843,106 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
     );
   }
 
-  // ── Main dropdown items ────────────────────────────────────────────────────
   Widget _buildMainDropdownItems() {
     return Column(
       key: const ValueKey('main'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Lock screen
-        _dropItem(
-          icon: Icons.lock_rounded,
-          label: 'Lock Screen',
-          onTap: () {
-            setState(() {
-              _showDropdown = false;
-              _showControls = false;
-              _isLocked = true;
-            });
-            _hideControlsTimer?.cancel();
-            _showLockBadgeTemporarily();
-          },
-        ),
+        _dropItem(icon: Icons.lock_rounded, label: 'Lock Screen', onTap: () {
+          setState(() { _showDropdown = false; _showControls = false; _isLocked = true; });
+          _hideControlsTimer?.cancel();
+          _showLockBadgeTemporarily();
+        }),
         _divider(),
-        // Fill / fit
         _dropItem(
           icon: _isExpanded ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
           label: _isExpanded ? 'Fit to Screen' : 'Fill Screen',
-          onTap: () {
-            setState(() {
-              _isExpanded = !_isExpanded;
-              _showDropdown = false;
-            });
-            _resetHideControlsTimer();
-          },
+          onTap: () { setState(() { _isExpanded = !_isExpanded; _showDropdown = false; }); _resetHideControlsTimer(); },
         ),
-        // Pending requests — host only
         if (widget.isOwner) ...[
           _divider(),
-          _dropItem(
-            icon: Icons.person_add_rounded,
-            label: 'Pending Requests',
-            badge: _pendingRequests.length,
-            onTap: () {
-              setState(() => _showPendingRequests = true);
-              _hideControlsTimer?.cancel();
-            },
-          ),
+          _dropItem(icon: Icons.person_add_rounded, label: 'Pending Requests', badge: _pendingRequests.length,
+            onTap: () { setState(() => _showPendingRequests = true); _hideControlsTimer?.cancel(); }),
         ],
       ],
     );
   }
 
-  // ── Pending requests panel ─────────────────────────────────────────────────
-  // iPhone 8 stacked notification card style
-  // Cards stack on each other, scroll reveals next, accept/reject fades card away
   Widget _buildPendingRequestsPanel() {
     return Column(
       key: const ValueKey('pending'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Header with back button
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-          child: Row(
-            children: [
-              GestureDetector(
-                onTap: () => setState(() => _showPendingRequests = false),
-                child: Icon(Icons.arrow_back_ios_new_rounded,
-                    color: Colors.white.withOpacity(0.6), size: 14),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'PENDING REQUESTS',
-                style: TextStyle(
-                  fontFamily: 'Inter',
-                  color: Colors.white.withOpacity(0.50),
-                  fontSize: 9,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 1.5,
-                ),
-              ),
-              const Spacer(),
-              Text(
-                '${_pendingRequests.length}',
-                style: TextStyle(
-                  fontFamily: 'Inter',
-                  color: AppColors.niorRed,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
+          child: Row(children: [
+            GestureDetector(onTap: () => setState(() => _showPendingRequests = false), child: Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white.withOpacity(0.6), size: 14)),
+            const SizedBox(width: 8),
+            Text('PENDING REQUESTS', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.50), fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+            const Spacer(),
+            Text('${_pendingRequests.length}', style: TextStyle(fontFamily: 'Inter', color: AppColors.niorRed, fontSize: 11, fontWeight: FontWeight.w700)),
+          ]),
         ),
         _divider(),
-
         if (_pendingRequests.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(20),
-            child: Text(
-              'No pending requests',
-              style: TextStyle(
-                fontFamily: 'Inter',
-                color: Colors.white.withOpacity(0.25),
-                fontSize: 12,
-              ),
-            ),
-          )
+          Padding(padding: const EdgeInsets.all(20), child: Text('No pending requests', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.25), fontSize: 12)))
         else
-          // Stacked scrollable cards — iPhone 8 notification style
           SizedBox(
             height: _pendingRequests.length == 1 ? 72 : 120,
             child: ListView.builder(
               padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
               itemCount: _pendingRequests.length,
-              itemBuilder: (context, index) {
-                final req = _pendingRequests[index];
-                return _buildRequestCard(req, index);
-              },
+              itemBuilder: (context, index) => _buildRequestCard(_pendingRequests[index], index),
             ),
           ),
       ],
     );
   }
 
-  // ── Individual request card ────────────────────────────────────────────────
   Widget _buildRequestCard(PendingJoinRequest req, int index) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Container(
         height: 56,
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.06),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.white.withOpacity(0.10), width: 0.8),
-        ),
-        child: Row(
-          children: [
-            const SizedBox(width: 10),
-            // Avatar
-            Container(
-              width: 34, height: 34,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: AppColors.darkGray,
-                border: Border.all(color: Colors.white.withOpacity(0.15), width: 0.8),
-              ),
-              child: ClipOval(
-                child: req.avatarPath != null
-                    ? Image.file(File(req.avatarPath!),
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => _reqInitial(req))
-                    : _reqInitial(req),
-              ),
-            ),
-            const SizedBox(width: 10),
-            // Username
-            Expanded(
-              child: Text(
-                req.username,
-                style: const TextStyle(
-                  fontFamily: 'Inter',
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            // Reject button — red X
-            GestureDetector(
-              onTap: () => _rejectRequest(req),
-              child: Container(
-                width: 32, height: 32,
-                margin: const EdgeInsets.only(right: 6),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.error.withOpacity(0.15),
-                  border: Border.all(
-                      color: AppColors.error.withOpacity(0.40), width: 0.8),
-                ),
-                child: Icon(Icons.close_rounded,
-                    color: AppColors.error, size: 16),
-              ),
-            ),
-            // Accept button — green tick
-            GestureDetector(
-              onTap: () => _acceptRequest(req),
-              child: Container(
-                width: 32, height: 32,
-                margin: const EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.success.withOpacity(0.15),
-                  border: Border.all(
-                      color: AppColors.success.withOpacity(0.40), width: 0.8),
-                ),
-                child: Icon(Icons.check_rounded,
-                    color: AppColors.success, size: 16),
-              ),
-            ),
-          ],
-        ),
+        decoration: BoxDecoration(color: Colors.white.withOpacity(0.06), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.white.withOpacity(0.10), width: 0.8)),
+        child: Row(children: [
+          const SizedBox(width: 10),
+          Container(
+            width: 34, height: 34,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: AppColors.darkGray, border: Border.all(color: Colors.white.withOpacity(0.15), width: 0.8)),
+            child: ClipOval(child: req.avatarPath != null ? Image.file(File(req.avatarPath!), fit: BoxFit.cover, errorBuilder: (_, __, ___) => _reqInitial(req)) : _reqInitial(req)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(child: Text(req.username, style: const TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600), maxLines: 1, overflow: TextOverflow.ellipsis)),
+          GestureDetector(onTap: () => _rejectRequest(req), child: Container(width: 32, height: 32, margin: const EdgeInsets.only(right: 6), decoration: BoxDecoration(shape: BoxShape.circle, color: AppColors.error.withOpacity(0.15), border: Border.all(color: AppColors.error.withOpacity(0.40), width: 0.8)), child: Icon(Icons.close_rounded, color: AppColors.error, size: 16))),
+          GestureDetector(onTap: () => _acceptRequest(req), child: Container(width: 32, height: 32, margin: const EdgeInsets.only(right: 8), decoration: BoxDecoration(shape: BoxShape.circle, color: AppColors.success.withOpacity(0.15), border: Border.all(color: AppColors.success.withOpacity(0.40), width: 0.8)), child: Icon(Icons.check_rounded, color: AppColors.success, size: 16))),
+        ]),
       ),
     );
   }
 
   Widget _reqInitial(PendingJoinRequest req) {
-    return Container(
-      color: AppColors.darkGray,
-      child: Center(
-        child: Text(
-          req.username.isNotEmpty ? req.username[0].toUpperCase() : '?',
-          style: const TextStyle(
-              fontFamily: 'BebasNeue', color: Colors.white, fontSize: 14),
-        ),
-      ),
-    );
+    return Container(color: AppColors.darkGray, child: Center(child: Text(req.username.isNotEmpty ? req.username[0].toUpperCase() : '?', style: const TextStyle(fontFamily: 'BebasNeue', color: Colors.white, fontSize: 14))));
   }
 
-  Widget _dropItem({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-    int badge = 0,
-  }) {
+  Widget _dropItem({required IconData icon, required String label, required VoidCallback onTap, int badge = 0}) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-        child: Row(
-          children: [
-            Icon(icon, color: Colors.white, size: 17),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  fontFamily: 'Inter',
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-            if (badge > 0)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: AppColors.niorRed,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  badge.toString(),
-                  style: const TextStyle(
-                    fontFamily: 'Inter',
-                    color: Colors.white,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-          ],
-        ),
+        child: Row(children: [
+          Icon(icon, color: Colors.white, size: 17),
+          const SizedBox(width: 12),
+          Expanded(child: Text(label, style: const TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500))),
+          if (badge > 0) Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: AppColors.niorRed, borderRadius: BorderRadius.circular(10)), child: Text(badge.toString(), style: const TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700))),
+        ]),
       ),
     );
   }
 
-  Widget _divider() => Divider(
-      height: 1, thickness: 0.5, color: Colors.white.withOpacity(0.08));
+  Widget _divider() => Divider(height: 1, thickness: 0.5, color: Colors.white.withOpacity(0.08));
 
-  // ── Lock overlay ───────────────────────────────────────────────────────────
   Widget _buildLockOverlay() {
     return Positioned(
       top: 20, right: 16,
@@ -1207,158 +950,99 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
         opacity: _showLockBadge ? 1.0 : 0.0,
         duration: const Duration(milliseconds: 300),
         child: GestureDetector(
-          onTap: () {
-            _lockBadgeTimer?.cancel();
-            setState(() {
-              _isLocked = false;
-              _showLockBadge = false;
-              _showControls = true;
-            });
-            _resetHideControlsTimer();
-          },
+          onTap: () { _lockBadgeTimer?.cancel(); setState(() { _isLocked = false; _showLockBadge = false; _showControls = true; }); _resetHideControlsTimer(); },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.65),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white.withOpacity(0.25), width: 0.8),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.lock_rounded, color: Colors.white, size: 16),
-                const SizedBox(width: 6),
-                Text('Tap to unlock',
-                    style: TextStyle(
-                        fontFamily: 'Inter',
-                        color: Colors.white,
-                        fontSize: 11)),
-              ],
-            ),
+            decoration: BoxDecoration(color: Colors.black.withOpacity(0.65), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withOpacity(0.25), width: 0.8)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.lock_rounded, color: Colors.white, size: 16),
+              const SizedBox(width: 6),
+              Text('Tap to unlock', style: TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 11)),
+            ]),
           ),
         ),
       ),
     );
   }
 
-  // ── Avatar panel ───────────────────────────────────────────────────────────
   Widget _buildAvatarPanel() {
     return Positioned(
-      right: 12, bottom: 80,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisSize: MainAxisSize.min,
-        children: _participants.map(_buildAvatarBubble).toList(),
-      ),
+      left: 12, bottom: 80,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: _participants.map(_buildAvatarBubble).toList()),
     );
   }
 
   Widget _buildAvatarBubble(RoomParticipant p) {
     final ctrl = _speakControllers[p.userId];
     final isSelf = p.userId == widget.currentUser.userId;
-
     return GestureDetector(
-      onLongPress: widget.isOwner && !isSelf
-          ? () => _showParticipantMenu(p)
-          : null,
+      onLongPress: widget.isOwner && !isSelf ? () => _showParticipantMenu(p) : null,
       child: Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: Stack(
           alignment: Alignment.center,
           children: [
             if (p.isSpeaking && ctrl != null)
-              AnimatedBuilder(
-                animation: ctrl,
-                builder: (_, __) => Container(
-                  width: 52 + (ctrl.value * 12),
-                  height: 52 + (ctrl.value * 12),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: AppColors.niorRed.withOpacity(0.6 - ctrl.value * 0.4),
-                      width: 2,
-                    ),
-                  ),
-                ),
-              ),
+              AnimatedBuilder(animation: ctrl, builder: (_, __) => Container(
+                width: 52 + (ctrl.value * 12), height: 52 + (ctrl.value * 12),
+                decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: AppColors.niorRed.withOpacity(0.6 - ctrl.value * 0.4), width: 2)),
+              )),
             Container(
               width: 44, height: 44,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: p.isOwner
-                      ? AppColors.niorRed
-                      : isSelf
-                          ? Colors.white.withOpacity(0.5)
-                          : Colors.white.withOpacity(0.15),
-                  width: p.isOwner ? 2 : 1,
-                ),
-                color: AppColors.darkGray,
-              ),
-              child: ClipOval(
-                child: p.avatarPath != null
-                    ? Image.file(File(p.avatarPath!),
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => _defaultAvatar(p))
-                    : _defaultAvatar(p),
-              ),
+              decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: p.isOwner ? AppColors.niorRed : isSelf ? Colors.white.withOpacity(0.5) : Colors.white.withOpacity(0.15), width: p.isOwner ? 2 : 1), color: AppColors.darkGray),
+              child: ClipOval(child: p.avatarPath != null ? _buildAvatarImage(p) : _defaultAvatar(p)),
             ),
-            if (p.isOwner)
-              Positioned(
-                top: -2, right: -2,
-                child: Container(
-                  width: 16, height: 16,
-                  decoration: BoxDecoration(
-                      shape: BoxShape.circle, color: AppColors.accentGold),
-                  child: const Icon(Icons.star_rounded, color: Colors.black, size: 10),
-                ),
-              ),
-            if (p.isMuted)
-              Positioned(
-                bottom: -2, right: -2,
-                child: Container(
-                  width: 16, height: 16,
-                  decoration: BoxDecoration(
-                      shape: BoxShape.circle, color: AppColors.error),
-                  child: const Icon(Icons.mic_off_rounded, color: Colors.white, size: 9),
-                ),
-              ),
+            if (p.isOwner) Positioned(top: -2, right: -2, child: Container(width: 16, height: 16, decoration: BoxDecoration(shape: BoxShape.circle, color: AppColors.accentGold), child: const Icon(Icons.star_rounded, color: Colors.black, size: 10))),
+            if (p.isMuted) Positioned(bottom: -2, right: -2, child: Container(width: 16, height: 16, decoration: BoxDecoration(shape: BoxShape.circle, color: AppColors.error), child: const Icon(Icons.mic_off_rounded, color: Colors.white, size: 9))),
           ],
         ),
       ),
     );
   }
 
+  Widget _buildAvatarImage(RoomParticipant p) {
+    final path = p.avatarPath!;
+
+    // Default avatar — load from local assets using avatar_id
+    if (path.startsWith('default:')) {
+      final avatarId = int.tryParse(path.split(':').last) ?? 1;
+      final isSvg = avatarId <= 9 || avatarId == 11 || avatarId == 12;
+      final assetPath = 'assets/avatar/avatar ($avatarId).${isSvg ? 'svg' : 'png'}';
+      if (isSvg) {
+        return SvgPicture.asset(assetPath, fit: BoxFit.cover,
+            placeholderBuilder: (_) => _defaultAvatar(p));
+      }
+      return Image.asset(assetPath, fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _defaultAvatar(p));
+    }
+
+    if (path.startsWith('data:image')) {
+
+      try {
+        final base64Str = path.contains(',') ? path.split(',').last : path;
+        final cleaned = base64Str.replaceAll('\n', '').replaceAll('\r', '').replaceAll(' ', '');
+        final remainder = cleaned.length % 4;
+        final normalised = remainder == 0 ? cleaned : cleaned + '=' * (4 - remainder);
+        final bytes = base64Decode(normalised);
+        return Image.memory(bytes, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _defaultAvatar(p));
+      } catch (_) { return _defaultAvatar(p); }
+    }
+    if (path.startsWith('/')) return Image.file(File(path), fit: BoxFit.cover, errorBuilder: (_, __, ___) => _defaultAvatar(p));
+    if (path.startsWith('http')) return Image.network(path, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _defaultAvatar(p));
+    return _defaultAvatar(p);
+  }
+
   Widget _defaultAvatar(RoomParticipant p) {
-    return Container(
-      color: AppColors.darkGray,
-      child: Center(
-        child: Text(
-          p.username.isNotEmpty ? p.username[0].toUpperCase() : '?',
-          style: const TextStyle(
-              fontFamily: 'BebasNeue', color: Colors.white, fontSize: 18),
-        ),
-      ),
-    );
+    return Container(color: AppColors.darkGray, child: Center(child: Text(p.username.isNotEmpty ? p.username[0].toUpperCase() : '?', style: const TextStyle(fontFamily: 'BebasNeue', color: Colors.white, fontSize: 18))));
   }
 
   Widget _buildAvatarToggle() {
     return Positioned(
-      top: 16, right: 16,
+      top: 100, right: 16,
       child: GestureDetector(
         onTap: () => setState(() => _showAvatars = !_showAvatars),
-        child: Container(
-          width: 36, height: 36,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.black.withOpacity(0.45),
-            border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8),
-          ),
-          child: Icon(
-            _showAvatars ? Icons.people_rounded : Icons.people_outline_rounded,
-            color: Colors.white.withOpacity(0.6), size: 16,
-          ),
-        ),
+        child: Container(width: 36, height: 36, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.black.withOpacity(0.45), border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8)),
+          child: Icon(_showAvatars ? Icons.people_rounded : Icons.people_outline_rounded, color: Colors.white.withOpacity(0.6), size: 16)),
       ),
     );
   }
@@ -1366,302 +1050,230 @@ class _RoomWatchScreenState extends ConsumerState<RoomWatchScreen>
   Widget _participantBadge() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.10),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(0.15), width: 0.8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.people_rounded, color: Colors.white.withOpacity(0.6), size: 12),
-          const SizedBox(width: 5),
-          Text('${_participants.length}',
-              style: TextStyle(
-                  fontFamily: 'Inter',
-                  color: Colors.white.withOpacity(0.7),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600)),
-        ],
-      ),
+      decoration: BoxDecoration(color: Colors.white.withOpacity(0.10), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withOpacity(0.15), width: 0.8)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.people_rounded, color: Colors.white.withOpacity(0.6), size: 12),
+        const SizedBox(width: 5),
+        Text('${_participants.length}', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.7), fontSize: 11, fontWeight: FontWeight.w600)),
+      ]),
     );
   }
 
   void _showParticipantMenu(RoomParticipant p) {
     showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
+      context: context, backgroundColor: Colors.transparent,
       builder: (_) => ClipRRect(
         borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
           child: Container(
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.80),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-              border: Border(top: BorderSide(color: Colors.white.withOpacity(0.08), width: 0.8)),
-            ),
+            decoration: BoxDecoration(color: Colors.black.withOpacity(0.80), borderRadius: const BorderRadius.vertical(top: Radius.circular(20)), border: Border(top: BorderSide(color: Colors.white.withOpacity(0.08), width: 0.8))),
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 36),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 36, height: 4,
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                Text('@${p.username}',
-                    style: const TextStyle(
-                        fontFamily: 'BebasNeue', color: Colors.white,
-                        fontSize: 18, letterSpacing: 1)),
-                const SizedBox(height: 20),
-                _menuItem(
-                  icon: p.isMuted ? Icons.mic_rounded : Icons.mic_off_rounded,
-                  label: p.isMuted ? 'Unmute' : 'Mute',
-                  color: Colors.white,
-                  onTap: () { Navigator.pop(context); _muteParticipant(p.userId); },
-                ),
-                const SizedBox(height: 10),
-                _menuItem(
-                  icon: Icons.exit_to_app_rounded,
-                  label: 'Remove from room',
-                  color: AppColors.error,
-                  onTap: () {
-                    Navigator.pop(context);
-                    _watchService?.sendKick(p.userId);
-                    setState(() => _participants.removeWhere((e) => e.userId == p.userId));
-                  },
-                ),
-              ],
-            ),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Container(width: 36, height: 4, margin: const EdgeInsets.only(bottom: 16), decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(2))),
+              Text('@${p.username}', style: const TextStyle(fontFamily: 'BebasNeue', color: Colors.white, fontSize: 18, letterSpacing: 1)),
+              const SizedBox(height: 20),
+              _menuItem(icon: p.isMuted ? Icons.mic_rounded : Icons.mic_off_rounded, label: p.isMuted ? 'Unmute' : 'Mute', color: Colors.white, onTap: () { Navigator.pop(context); _muteParticipant(p.userId); }),
+              const SizedBox(height: 10),
+              _menuItem(icon: Icons.exit_to_app_rounded, label: 'Remove from room', color: AppColors.error, onTap: () { Navigator.pop(context); _watchService?.sendKick(p.userId); setState(() => _participants.removeWhere((e) => e.userId == p.userId)); }),
+            ]),
           ),
         ),
       ),
     );
   }
 
-  Widget _menuItem({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
+  Widget _menuItem({required IconData icon, required String label, required Color color, required VoidCallback onTap}) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.15), width: 0.8),
-        ),
-        child: Row(
-          children: [
-            Icon(icon, color: color, size: 18),
-            const SizedBox(width: 12),
-            Text(label,
-                style: TextStyle(fontFamily: 'Inter', color: color,
-                    fontSize: 14, fontWeight: FontWeight.w500)),
-          ],
-        ),
+      child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: color.withOpacity(0.08), borderRadius: BorderRadius.circular(12), border: Border.all(color: color.withOpacity(0.15), width: 0.8)),
+        child: Row(children: [Icon(icon, color: color, size: 18), const SizedBox(width: 12), Text(label, style: TextStyle(fontFamily: 'Inter', color: color, fontSize: 14, fontWeight: FontWeight.w500))]),
       ),
     );
   }
 
   void _confirmLeave() {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF141414),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text(widget.isOwner ? 'End Room?' : 'Leave Room?',
-            style: const TextStyle(fontFamily: 'BebasNeue', color: Colors.white,
-                fontSize: 20, letterSpacing: 1)),
-        content: Text(
-          widget.isOwner
-              ? 'Ending the room will disconnect all participants.'
-              : 'You can rejoin using the room link.',
-          style: TextStyle(fontFamily: 'Inter',
-              color: Colors.white.withOpacity(0.40), fontSize: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text('Stay', style: TextStyle(fontFamily: 'Inter',
-                color: Colors.white.withOpacity(0.35))),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              if (widget.isOwner) _stopRoom();
-              else Navigator.pop(context);
-            },
-            child: Text(widget.isOwner ? 'End' : 'Leave',
-                style: TextStyle(fontFamily: 'Inter', color: AppColors.error)),
-          ),
-        ],
-      ),
-    );
+    showDialog(context: context, builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF141414),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text(widget.isOwner ? 'End Room?' : 'Leave Room?', style: const TextStyle(fontFamily: 'BebasNeue', color: Colors.white, fontSize: 20, letterSpacing: 1)),
+      content: Text(widget.isOwner ? 'Ending the room will disconnect all participants.' : 'You can rejoin using the room link.', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.40), fontSize: 13)),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: Text('Stay', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.35)))),
+        TextButton(onPressed: () { Navigator.pop(context); if (widget.isOwner) _stopRoom(); else Navigator.pop(context); }, child: Text(widget.isOwner ? 'End' : 'Leave', style: TextStyle(fontFamily: 'Inter', color: AppColors.error))),
+      ],
+    ));
   }
 
   void _showKickedDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF141414),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Removed from room',
-            style: TextStyle(fontFamily: 'BebasNeue', color: Colors.white,
-                fontSize: 20, letterSpacing: 1)),
-        content: Text('The host has removed you from this room.',
-            style: TextStyle(fontFamily: 'Inter',
-                color: Colors.white.withOpacity(0.40), fontSize: 13)),
-        actions: [
-          TextButton(
-            onPressed: () { Navigator.pop(context); Navigator.pop(context); },
-            child: const Text('OK',
-                style: TextStyle(fontFamily: 'Inter', color: Colors.white)),
-          ),
-        ],
-      ),
-    );
+    showDialog(context: context, barrierDismissible: false, builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF141414),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('Removed from room', style: TextStyle(fontFamily: 'BebasNeue', color: Colors.white, fontSize: 20, letterSpacing: 1)),
+      content: Text('The host has removed you from this room.', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.40), fontSize: 13)),
+      actions: [TextButton(onPressed: () { Navigator.pop(context); Navigator.pop(context); }, child: const Text('OK', style: TextStyle(fontFamily: 'Inter', color: Colors.white)))],
+    ));
   }
 
   void _showRoomEndedDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF141414),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Room ended',
-            style: TextStyle(fontFamily: 'BebasNeue', color: Colors.white,
-                fontSize: 20, letterSpacing: 1)),
-        content: Text('The host has ended the room.',
-            style: TextStyle(fontFamily: 'Inter',
-                color: Colors.white.withOpacity(0.40), fontSize: 13)),
-        actions: [
-          TextButton(
-            onPressed: () { Navigator.pop(context); Navigator.pop(context); },
-            child: const Text('OK',
-                style: TextStyle(fontFamily: 'Inter', color: Colors.white)),
-          ),
-        ],
-      ),
-    );
+    showDialog(context: context, barrierDismissible: false, builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF141414),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('Room ended', style: TextStyle(fontFamily: 'BebasNeue', color: Colors.white, fontSize: 20, letterSpacing: 1)),
+      content: Text('The host has ended the room.', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.40), fontSize: 13)),
+      actions: [TextButton(onPressed: () { Navigator.pop(context); Navigator.pop(context); }, child: const Text('OK', style: TextStyle(fontFamily: 'Inter', color: Colors.white)))],
+    ));
   }
 
   Widget _buildLoadingOverlay() => Container(
-        color: Colors.black,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(width: 24, height: 24,
-                  child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.niorRed)),
-              const SizedBox(height: 14),
-              Text('Loading video...',
-                  style: TextStyle(fontFamily: 'Inter',
-                      color: Colors.white.withOpacity(0.30), fontSize: 13)),
-            ],
-          ),
-        ),
-      );
+    color: Colors.black,
+    child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.niorRed)),
+      const SizedBox(height: 14),
+      Text('Loading video...', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.30), fontSize: 13)),
+    ])),
+  );
 
   Widget _buildConnectingBadge() => Positioned(
-        bottom: 20, left: 0, right: 0,
-        child: Center(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.55),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(width: 10, height: 10,
-                    child: CircularProgressIndicator(strokeWidth: 1.2, color: AppColors.niorRed)),
-                const SizedBox(width: 8),
-                Text('Connecting to room...',
-                    style: TextStyle(fontFamily: 'Inter',
-                        color: Colors.white.withOpacity(0.35), fontSize: 11)),
-              ],
-            ),
-          ),
-        ),
-      );
+    bottom: 20, left: 0, right: 0,
+    child: Center(child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      decoration: BoxDecoration(color: Colors.black.withOpacity(0.55), borderRadius: BorderRadius.circular(20)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.2, color: AppColors.niorRed)),
+        const SizedBox(width: 8),
+        Text('Connecting to room...', style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.35), fontSize: 11)),
+      ]),
+    )),
+  );
 
   Widget _buildErrorOverlay() => Container(
-        color: Colors.black,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
-              const SizedBox(height: 16),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: Text(_videoErrorMessage,
-                    style: TextStyle(fontFamily: 'Inter',
-                        color: Colors.white.withOpacity(0.50), fontSize: 13),
-                    textAlign: TextAlign.center),
-              ),
-              const SizedBox(height: 24),
-              GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.08),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8),
-                  ),
-                  child: const Text('Leave',
-                      style: TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 13)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
+    color: Colors.black,
+    child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
+      const SizedBox(height: 16),
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 32), child: Text(_videoErrorMessage, style: TextStyle(fontFamily: 'Inter', color: Colors.white.withOpacity(0.50), fontSize: 13), textAlign: TextAlign.center)),
+      const SizedBox(height: 24),
+      GestureDetector(onTap: () => Navigator.pop(context), child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(color: Colors.white.withOpacity(0.08), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8)),
+        child: const Text('Leave', style: TextStyle(fontFamily: 'Inter', color: Colors.white, fontSize: 13)),
+      )),
+    ])),
+  );
 
   Widget _glassBtn({required IconData icon, required VoidCallback onTap, Color? color}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: ClipOval(
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white.withOpacity(0.10),
-              border: Border.all(color: Colors.white.withOpacity(0.15), width: 0.8),
-            ),
-            child: Icon(icon, color: color ?? Colors.white, size: 17),
-          ),
-        ),
-      ),
-    );
+    return GestureDetector(onTap: onTap, child: ClipOval(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10), child: Container(width: 40, height: 40, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withOpacity(0.10), border: Border.all(color: Colors.white.withOpacity(0.15), width: 0.8)), child: Icon(icon, color: color ?? Colors.white, size: 17)))));
   }
 
   Widget _centerBtn({required IconData icon, required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 44, height: 44,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Colors.white.withOpacity(0.10),
+    return GestureDetector(onTap: onTap, child: Container(width: 44, height: 44, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withOpacity(0.10)), child: Icon(icon, color: Colors.white, size: 24)));
+  }
+
+  // ── Reaction bar ───────────────────────────────────────────────────────────
+  Widget _buildReactionBar() {
+    return Positioned(
+      bottom: 72, left: 0, right: 0,
+      child: AnimatedOpacity(
+        opacity: _showControls ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 300),
+        child: SizedBox(
+          height: 52,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            itemCount: _reactionEmojis.length,
+            itemBuilder: (context, i) {
+              return GestureDetector(
+                onTap: () => _sendReaction(_reactionEmojis[i]),
+                child: Container(
+                  width: 44, height: 44,
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.black.withOpacity(0.45), border: Border.all(color: Colors.white.withOpacity(0.12), width: 0.8)),
+                  padding: const EdgeInsets.all(6),
+                  child: Image.asset(_reactionEmojis[i], fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.emoji_emotions_rounded, color: Colors.white, size: 20)),
+                ),
+              );
+            },
+          ),
         ),
-        child: Icon(icon, color: Colors.white, size: 24),
       ),
     );
   }
+
+  // ── Floating reaction bubble ───────────────────────────────────────────────
+     Widget _buildReactionBubble(_ReactionBubble r) {
+  final participant = _participants.firstWhere(
+    (p) => p.userId == r.userId,
+    orElse: () => RoomParticipant(userId: r.userId, username: r.username),
+  );
+  // Use a hash of userId+id to spread bubbles horizontally
+  // Without this all bubbles stack at identical coordinates and look invisible
+  final double rightOffset = 60.0 + (r.id.hashCode.abs() % 200).toDouble();
+  return Positioned(
+    right: rightOffset, bottom: 120,
+      child: FadeTransition(
+        opacity: r.fadeAnim,
+        child: SlideTransition(
+          position: r.slideAnim,
+          child: Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: AppColors.darkGray, border: Border.all(color: AppColors.niorRed.withOpacity(0.5), width: 1.5)),
+              child: ClipOval(child: participant.avatarPath != null ? _buildAvatarImage(participant) : _defaultAvatar(participant)),
+            ),
+            const SizedBox(width: 6),
+            Container(
+              width: 48, height: 48,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.black.withOpacity(0.55), border: Border.all(color: Colors.white.withOpacity(0.15), width: 0.8)),
+              padding: const EdgeInsets.all(6),
+              child: Image.asset(r.emoji, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.emoji_emotions_rounded, color: Colors.white, size: 24)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ── Mute button ────────────────────────────────────────────────────────────
+  Widget _buildMuteButton() {
+    return Positioned(
+      bottom: 20, left: 16,
+      child: GestureDetector(
+        onTap: _toggleMute,
+        child: Container(
+          width: 44, height: 44,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _isMuted ? AppColors.error.withOpacity(0.20) : Colors.black.withOpacity(0.45),
+            border: Border.all(color: _isMuted ? AppColors.error.withOpacity(0.50) : Colors.white.withOpacity(0.12), width: 0.8),
+          ),
+          child: Icon(_isMuted ? Icons.mic_off_rounded : Icons.mic_rounded, color: _isMuted ? AppColors.error : Colors.white.withOpacity(0.7), size: 20),
+        ),
+      ),
+    );
+  }
+
+} 
+
+// ── Reaction bubble model ─────────────────────────────────────────────────────
+class _ReactionBubble {
+  final String userId;
+  final String username;
+  final String emoji;
+  final String id;
+  final AnimationController controller;
+  final Animation<double> fadeAnim;
+  final Animation<Offset> slideAnim;
+
+  _ReactionBubble({
+    required this.userId,
+    required this.username,
+    required this.emoji,
+    required this.id,
+    required this.controller,
+    required this.fadeAnim,
+    required this.slideAnim,
+  });
 }

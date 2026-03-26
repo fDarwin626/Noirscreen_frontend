@@ -51,13 +51,11 @@ class RoomsService {
       // Minimum 2 minutes from now
       // Maximum 5 days from now
       final now = DateTime.now();
-      final minTime = now.add(const Duration(minutes: 2));
       final maxTime = now.add(const Duration(days: 5));
 
-      if (scheduledAt.isBefore(minTime)) {
+      if (scheduledAt.isBefore(now.add(const Duration(minutes: 1, seconds: 50)))) {
         throw Exception('Room must be scheduled at least 2 minutes from now');
       }
-
       if (scheduledAt.isAfter(maxTime)) {
         throw Exception('Room cannot be scheduled more than 5 days in advance');
       }
@@ -72,7 +70,11 @@ class RoomsService {
           'video_thumbnail_path': videoThumbnailPath,
           'video_file_path': videoFilePath,
           'stream_type': streamType,
-          'scheduled_at': scheduledAt.toIso8601String(),
+          // ── FIX: .toUtc() adds the Z suffix so Node/Postgres parse it
+          // as UTC, not as the server's local timezone (which on Render is
+          // UTC but Node's Date constructor treats no-Z strings as UTC too,
+          // creating a double-UTC interpretation mismatch for local datetimes)
+          'scheduled_at': scheduledAt.toUtc().toIso8601String(),
           'video_duration': videoDuration,
         }),
       );
@@ -87,6 +89,47 @@ class RoomsService {
     } catch (e) {
       print('❌ ROOMS SERVICE: createRoom error - $e');
       rethrow;
+    }
+  }
+
+
+// Host instantly activates a room from the waiting room
+  Future<bool> startRoom(String roomId) async {
+    try {
+      final userId = await _authService.getUserId();
+      if (userId == null) return false;
+
+      final response = await http.post(
+        Uri.parse('${ApiService.baseUrl}/api/rooms/$roomId/start'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'host_id': userId}),
+      );
+
+      return response.statusCode == 200;
+    } catch (e) {
+      print('❌ ROOMS SERVICE: startRoom error - $e');
+      return false;
+    }
+  }
+
+
+// Get a single room by ID — used by viewer to check if room went active
+  // Viewers are not hosts so scheduledRoomsProvider won't have their room
+  Future<ScheduledRoomModel?> getRoomById(String roomId) async {
+    try {
+      final response = await http.post(
+        Uri.parse('${ApiService.baseUrl}/api/rooms/join'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'link': 'noirscreen://room/$roomId'}),
+      );
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return ScheduledRoomModel.fromJson(data['room']);
+      }
+      return null;
+    } catch (e) {
+      print('❌ ROOMS SERVICE: getRoomById error - $e');
+      return null;
     }
   }
 

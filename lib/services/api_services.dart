@@ -4,25 +4,28 @@ import 'package:http/http.dart' as http;
 import 'package:noirscreen/models/user_model.dart';
 
 class ApiService {
-  // Smart URL selection:
-  // - Emulator: http://10.0.2.2:3000 (automatic)
-  // - Real Device: http://192.168.0.113:3000 (use --dart-define=API_URL=...)
-  // - Production: https://your-server.com (use --dart-define=API_URL=...)
   
-  static String get baseUrl {
-    // Check if a custom API URL was provided at runtime
+static String get baseUrl {
+    // Emulator:    flutter run
+    // Real device: flutter run --dart-define=API_URL=https://noirscreen-server.onrender.com
+    // Release apk: flutter build apk --dart-define=API_URL=https://noirscreen-server.onrender.com
     const customUrl = String.fromEnvironment('API_URL');
-    
     if (customUrl.isNotEmpty) {
-      print('📡 API: Using custom URL: $customUrl');
+      print('📡 API: Using custom URL');
       return customUrl;
     }
-    
-    // Default: Use emulator URL (works for Android emulator)
-    print('📡 API: Using emulator URL: http://10.0.2.2:3000');
+
+    // Priority 2 — release build always hits production
+    const isRelease = bool.fromEnvironment('dart.vm.product');
+    if (isRelease) {
+      print('📡 API: Production');
+      return 'https://noirscreen-server.onrender.com';
+    }
+
+    // Priority 3 — debug default is local emulator
+    print('📡 API: Using emulator URL');
     return 'http://10.0.2.2:3000';
   }
-
   // Register Users
   Future<UserModel?> registerUser({
     required String username,

@@ -41,12 +41,13 @@ class ScheduledRoomModel {
       videoTitle: json['video_title'] as String,
       videoThumbnailPath: json['video_thumbnail_path'] as String?,
       streamType: json['stream_type'] as String,
-      scheduledAt: DateTime.parse(json['scheduled_at'] as String),
-      createdAt: DateTime.parse(json['created_at'] as String),
+      scheduledAt: DateTime.parse(json['scheduled_at'] as String).toLocal(),
       status: json['status'] as String,
+      linkExpiresAt: DateTime.parse(json['link_expires_at'] as String).toLocal(),
       shareableLink: json['shareable_link'] as String,
-      linkExpiresAt: DateTime.parse(json['link_expires_at'] as String),
      videoFilePath: json['video_file_path'] as String?,
+     createdAt: DateTime.parse(json['created_at'] as String).toLocal(),
+
     );
   }
 

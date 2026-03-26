@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -28,16 +30,12 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   UserModel? _currentUser;
   bool _isLoadingUser = true;
-
-  // Tracks which bottom nav tab is active
-  // 0 = Home, 1 = Library, 2 = Rooms, 3 = Discover, 4 = Account
   int _currentNavIndex = 0;
 
   @override
   void initState() {
     super.initState();
 
-    // Transparent status bar with white icons so video bleeds through
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -50,7 +48,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     if (widget.shouldRefresh) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        print('🔄 HOME SCREEN: Invalidating all providers (shouldRefresh=true)');
         ref.invalidate(allVideosProvider);
         ref.invalidate(downloadedVideosProvider);
         ref.invalidate(whatsappVideosProvider);
@@ -71,46 +68,45 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       if (userId != null) {
         final user = await apiService.getUser(userId);
         if (mounted) {
-          setState(() {
-            _currentUser = user;
-            _isLoadingUser = false;
-          });
+          setState(() { _currentUser = user; _isLoadingUser = false; });
         }
       }
     } catch (e) {
-      print('Error loading user: $e');
       if (mounted) setState(() => _isLoadingUser = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // BUG 3 FIX: read the bottom system inset so our nav bar sits above
+    // the 3-button nav (circle/square/triangle) on phones that use it.
+    // On gesture-nav phones this is 0. On 3-button phones it's ~48dp.
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+
     return Scaffold(
       backgroundColor: AppColors.black,
-      // IndexedStack keeps all screens alive in memory
-      // Switching tabs does not reload data or lose scroll position
       body: IndexedStack(
         index: _currentNavIndex,
         children: const [
-          // 0 — Home
           _HomeContent(),
-          // 1 — My Library (placeholder until we build it)
           _PlaceholderScreen(label: 'My Library'),
-          // 2 — Rooms
           RoomsScreen(),
-          // 3 — Discover (placeholder until we build it)
           _PlaceholderScreen(label: 'Discover'),
-          // 4 — Account (placeholder until we build it)
           _PlaceholderScreen(label: 'Account'),
         ],
       ),
-      bottomNavigationBar: _buildBottomNav(context),
+      bottomNavigationBar: _buildBottomNav(context, bottomInset),
     );
   }
 
-  Widget _buildBottomNav(BuildContext context) {
+  Widget _buildBottomNav(BuildContext context, double bottomInset) {
+    // BUG 3 FIX: add bottomInset as bottom padding so the nav items sit
+    // above the system navigation bar on 3-button phones.
+    // The extra padding pushes items up exactly far enough so they
+    // don't overlap the circle/square/triangle buttons.
     return Container(
-      height: 70,
+      // 70 = icon + label height, bottomInset = system nav bar height
+      height: 70 + bottomInset,
       decoration: BoxDecoration(
         color: AppColors.backgroundCard,
         border: Border(
@@ -120,20 +116,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _buildNavItem(Icons.home_rounded, 'Home', 0),
-          _buildNavItem(Icons.bookmark_rounded, 'My Library', 1),
-          _buildNavItem(Icons.grid_view_rounded, 'Rooms', 2),
-          _buildNavItem(Icons.auto_awesome_rounded, 'Discover', 3),
-          _buildNavItemAvatar(4),
-        ],
+      child: Padding(
+        // Push nav items up by the system nav bar height
+        padding: EdgeInsets.only(bottom: bottomInset),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            _buildNavItem(Icons.home_rounded, 'Home', 0),
+            _buildNavItem(Icons.bookmark_rounded, 'My Library', 1),
+            _buildNavItem(Icons.grid_view_rounded, 'Rooms', 2),
+            _buildNavItem(Icons.auto_awesome_rounded, 'Discover', 3),
+            _buildNavItemAvatar(4),
+          ],
+        ),
       ),
     );
   }
 
-  // Regular nav item (icon + label)
   Widget _buildNavItem(IconData icon, String label, int index) {
     final isActive = _currentNavIndex == index;
     return GestureDetector(
@@ -145,26 +144,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              icon,
-              color: isActive ? AppColors.niorRed : AppColors.textGray,
-              size: 24,
-            ),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: AppTextStyles.caption.copyWith(
+            Icon(icon,
                 color: isActive ? AppColors.niorRed : AppColors.textGray,
-                fontSize: 10,
-              ),
-            ),
+                size: 24),
+            const SizedBox(height: 4),
+            Text(label,
+                style: AppTextStyles.caption.copyWith(
+                  color: isActive ? AppColors.niorRed : AppColors.textGray,
+                  fontSize: 10,
+                )),
           ],
         ),
       ),
     );
   }
 
-  // Avatar nav item for Account tab
   Widget _buildNavItemAvatar(int index) {
     final isActive = _currentNavIndex == index;
     return GestureDetector(
@@ -177,8 +171,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Container(
-              width: 28,
-              height: 28,
+              width: 28, height: 28,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
@@ -188,22 +181,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ),
               child: ClipOval(
                 child: _isLoadingUser
-                    ? Icon(Icons.person_rounded,
-                        color: AppColors.textGray, size: 20)
+                    ? Icon(Icons.person_rounded, color: AppColors.textGray, size: 20)
                     : _currentUser != null
                         ? _buildUserAvatar()
-                        : Icon(Icons.person_rounded,
-                            color: AppColors.textGray, size: 20),
+                        : Icon(Icons.person_rounded, color: AppColors.textGray, size: 20),
               ),
             ),
             const SizedBox(height: 4),
-            Text(
-              'Account',
-              style: AppTextStyles.caption.copyWith(
-                color: isActive ? AppColors.niorRed : AppColors.textGray,
-                fontSize: 10,
-              ),
-            ),
+            Text('Account',
+                style: AppTextStyles.caption.copyWith(
+                  color: isActive ? AppColors.niorRed : AppColors.textGray,
+                  fontSize: 10,
+                )),
           ],
         ),
       ),
@@ -211,32 +200,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Widget _buildUserAvatar() {
-    if (_currentUser!.avatarType == 'custom' &&
-        _currentUser!.photoUrl != null) {
-      return Image.network(
-        '${ApiService.baseUrl}${_currentUser!.photoUrl}',
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) =>
-            Icon(Icons.person_rounded, color: AppColors.textGray, size: 20),
-      );
-    } else if (_currentUser!.avatarType == 'default' &&
-        _currentUser!.avatarId != null) {
+    if (_currentUser!.avatarType == 'custom' && _currentUser!.photoUrl != null) {
+      final photo = _currentUser!.photoUrl!;
+      if (photo.startsWith('data:image')) {
+        try {
+          final base64Str = photo.contains(',') ? photo.split(',').last : photo;
+          final cleaned = base64Str.replaceAll('\n', '').replaceAll('\r', '').replaceAll(' ', '');
+          final rem = cleaned.length % 4;
+          final normalised = rem == 0 ? cleaned : cleaned + '=' * (4 - rem);
+          final bytes = base64Decode(normalised);
+          return Image.memory(bytes, fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) =>
+                  Icon(Icons.person_rounded, color: AppColors.textGray, size: 20));
+        } catch (_) {
+          return Icon(Icons.person_rounded, color: AppColors.textGray, size: 20);
+        }
+      }
+      return Image.network('${ApiService.baseUrl}$photo', fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) =>
+              Icon(Icons.person_rounded, color: AppColors.textGray, size: 20));
+    } else if (_currentUser!.avatarType == 'default' && _currentUser!.avatarId != null) {
       final avatarId = _currentUser!.avatarId!;
       final isSvg = avatarId <= 9 || avatarId == 11 || avatarId == 12;
-      final path =
-          'assets/avatar/avatar ($avatarId).${isSvg ? 'svg' : 'png'}';
-      if (isSvg) {
-        return SvgPicture.asset(path, fit: BoxFit.cover);
-      } else {
-        return Image.asset(path, fit: BoxFit.cover);
-      }
+      final path = 'assets/avatar/avatar ($avatarId).${isSvg ? 'svg' : 'png'}';
+      if (isSvg) return SvgPicture.asset(path, fit: BoxFit.cover);
+      return Image.asset(path, fit: BoxFit.cover);
     }
     return Icon(Icons.person_rounded, color: AppColors.textGray, size: 20);
   }
 }
 
 // ── Home content ──────────────────────────────────────────────────────────────
-// Separated into its own widget so IndexedStack can keep it alive
 class _HomeContent extends ConsumerWidget {
   const _HomeContent();
 
@@ -267,156 +261,111 @@ class _HomeContent extends ConsumerWidget {
       },
       child: CustomScrollView(
         slivers: [
-
-        // ── Hero carousel + floating header ─────────────────────────
-        SliverToBoxAdapter(
-          child: Stack(
-            children: [
-              // Full bleed carousel from top of screen
-              recentlyWatched.when(
-                data: (videos) {
-                  if (videos.isEmpty) {
-                    return Consumer(
-                      builder: (context, ref, child) {
-                        final downloaded = ref.watch(downloadedVideosProvider);
-                        return downloaded.when(
-                          data: (vids) => vids.isNotEmpty
-                              ? ContinueWatchingCarousel(
-                                  videos: vids.take(5).toList())
-                              : const SizedBox.shrink(),
-                          loading: () => const _CarouselSkeleton(),
-                          error: (_, __) => const SizedBox.shrink(),
-                        );
-                      },
-                    );
-                  }
-                  return ContinueWatchingCarousel(videos: videos);
-                },
-                loading: () => const _CarouselSkeleton(),
-                error: (_, __) => const SizedBox.shrink(),
-              ),
-
-              // Header floats at exactly status bar height
-              Positioned(
-                top: statusBarHeight,
-                left: 0,
-                right: 0,
-                child: _buildHeader(context),
-              ),
-            ],
+          SliverToBoxAdapter(
+            child: Stack(
+              children: [
+                recentlyWatched.when(
+                  data: (videos) {
+                    if (videos.isEmpty) {
+                      return Consumer(
+                        builder: (context, ref, child) {
+                          final downloaded = ref.watch(downloadedVideosProvider);
+                          return downloaded.when(
+                            data: (vids) => vids.isNotEmpty
+                                ? ContinueWatchingCarousel(videos: vids.take(5).toList())
+                                : const SizedBox.shrink(),
+                            loading: () => const _CarouselSkeleton(),
+                            error: (_, __) => const SizedBox.shrink(),
+                          );
+                        },
+                      );
+                    }
+                    return ContinueWatchingCarousel(videos: videos);
+                  },
+                  loading: () => const _CarouselSkeleton(),
+                  error: (_, __) => const SizedBox.shrink(),
+                ),
+                Positioned(
+                  top: statusBarHeight, left: 0, right: 0,
+                  child: _buildHeader(context),
+                ),
+              ],
+            ),
           ),
-        ),
 
-        SliverToBoxAdapter(child: const SizedBox(height: 32)),
+          SliverToBoxAdapter(child: const SizedBox(height: 32)),
 
-        // ── Downloaded Videos ────────────────────────────────────────
-        SliverToBoxAdapter(
-          child: VideoCategoryRow(
-            title: 'Downloaded Videos',
-            provider: downloadedVideosProvider,
+          SliverToBoxAdapter(
+            child: VideoCategoryRow(title: 'Downloaded Videos', provider: downloadedVideosProvider),
           ),
-        ),
+          SliverToBoxAdapter(child: const SizedBox(height: 24)),
 
-        SliverToBoxAdapter(child: const SizedBox(height: 24)),
-
-        // ── TV Shows glassmorphism cards ─────────────────────────────
-        SliverToBoxAdapter(
-          child: tvShows.when(
-            data: (seriesList) {
-              if (seriesList.isEmpty) return const SizedBox.shrink();
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      'TV SHOWS',
-                      style: AppTextStyles.header3.copyWith(
-                        color: AppColors.textWhite,
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
+          SliverToBoxAdapter(
+            child: tvShows.when(
+              data: (seriesList) {
+                if (seriesList.isEmpty) return const SizedBox.shrink();
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text('TV SHOWS',
+                          style: AppTextStyles.header3.copyWith(
+                              color: AppColors.textWhite, fontSize: 20, fontWeight: FontWeight.bold)),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: 320,
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        itemCount: seriesList.length,
+                        itemBuilder: (context, index) {
+                          final series = seriesList[index];
+                          final episodesAsync = ref.watch(episodesProvider(series.id));
+                          return episodesAsync.when(
+                            data: (episodes) => SeriesCardWidget(
+                              series: series,
+                              previewEpisodes: episodes,
+                              onTap: () => Navigator.push(context, MaterialPageRoute(
+                                  builder: (_) => SeriesDetailScreen(series: series))),
+                            ),
+                            loading: () => _buildSeriesCardSkeleton(),
+                            error: (_, __) => const SizedBox.shrink(),
+                          );
+                        },
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    height: 320,
-                    child: ListView.builder(
-                      scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      itemCount: seriesList.length,
-                      itemBuilder: (context, index) {
-                        final series = seriesList[index];
-                        final episodesAsync =
-                            ref.watch(episodesProvider(series.id));
-                        return episodesAsync.when(
-                          data: (episodes) => SeriesCardWidget(
-                            series: series,
-                            previewEpisodes: episodes,
-                            onTap: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    SeriesDetailScreen(series: series),
-                              ),
-                            ),
-                          ),
-                          loading: () => _buildSeriesCardSkeleton(),
-                          error: (_, __) => const SizedBox.shrink(),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                ],
-              );
-            },
-            loading: () => const SizedBox.shrink(),
-            error: (_, __) => const SizedBox.shrink(),
+                    const SizedBox(height: 24),
+                  ],
+                );
+              },
+              loading: () => const SizedBox.shrink(),
+              error: (_, __) => const SizedBox.shrink(),
+            ),
           ),
-        ),
 
-
-        // ── Most Streamed ────────────────────────────────────────────
-        SliverToBoxAdapter(
-          child: VideoCategoryRow(
-            title: 'Most Streamed',
-            provider: mostStreamedProvider,
+          SliverToBoxAdapter(
+            child: VideoCategoryRow(title: 'Most Streamed', provider: mostStreamedProvider),
           ),
-        ),
+          SliverToBoxAdapter(child: const SizedBox(height: 24)),
 
-        SliverToBoxAdapter(child: const SizedBox(height: 24)),
-
-        // ── WhatsApp Videos ──────────────────────────────────────────
-        SliverToBoxAdapter(
-          child: VideoCategoryRow(
-            title: 'WhatsApp Videos',
-            provider: whatsappVideosProvider,
+          SliverToBoxAdapter(
+            child: VideoCategoryRow(title: 'WhatsApp Videos', provider: whatsappVideosProvider),
           ),
-        ),
+          SliverToBoxAdapter(child: const SizedBox(height: 24)),
 
-        SliverToBoxAdapter(child: const SizedBox(height: 24)),
-
-        // ── Movies ───────────────────────────────────────────────────
-        SliverToBoxAdapter(
-          child: VideoCategoryRow(
-            title: 'Movies',
-            provider: moviesProvider,
+          SliverToBoxAdapter(
+            child: VideoCategoryRow(title: 'Movies', provider: moviesProvider),
           ),
-        ),
+          SliverToBoxAdapter(child: const SizedBox(height: 24)),
 
-        SliverToBoxAdapter(child: const SizedBox(height: 24)),
-
-        // ── Camera Videos ────────────────────────────────────────────
-        SliverToBoxAdapter(
-          child: VideoCategoryRow(
-            title: 'Camera Videos',
-            provider: cameraVideosProvider,
+          SliverToBoxAdapter(
+            child: VideoCategoryRow(title: 'Camera Videos', provider: cameraVideosProvider),
           ),
-        ),
 
-        const SliverToBoxAdapter(child: SizedBox(height: 100)),
-      ],
+          const SliverToBoxAdapter(child: SizedBox(height: 100)),
+        ],
       ),
     );
   }
@@ -427,39 +376,21 @@ class _HomeContent extends ConsumerWidget {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [
-            AppColors.black.withOpacity(0.5),
-            Colors.transparent,
-          ],
+          colors: [AppColors.black.withOpacity(0.5), Colors.transparent],
         ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          Image.asset(
-            'assets/images/NOIR logo white.png',
-            height: 32,
-            fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => Text(
-              'NOIRSCREEN',
-              style: AppTextStyles.bodyBold.copyWith(
-                color: AppColors.niorRed,
-                fontSize: 13,
-                letterSpacing: 1.2,
-              ),
-            ),
-          ),
+          Image.asset('assets/images/NOIR logo white.png', height: 32, fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => Text('NOIRSCREEN',
+                  style: AppTextStyles.bodyBold.copyWith(
+                      color: AppColors.niorRed, fontSize: 13, letterSpacing: 1.2))),
           const Spacer(),
-          IconButton(
-            icon: Icon(Icons.cast_rounded,
-                color: AppColors.textWhite, size: 24),
-            onPressed: () {},
-          ),
-          IconButton(
-            icon: Icon(Icons.search_rounded,
-                color: AppColors.textWhite, size: 24),
-            onPressed: () {},
-          ),
+          IconButton(icon: Icon(Icons.cast_rounded, color: AppColors.textWhite, size: 24),
+              onPressed: () {}),
+          IconButton(icon: Icon(Icons.search_rounded, color: AppColors.textWhite, size: 24),
+              onPressed: () {}),
         ],
       ),
     );
@@ -467,18 +398,13 @@ class _HomeContent extends ConsumerWidget {
 
   Widget _buildSeriesCardSkeleton() {
     return Container(
-      width: 220,
-      height: 320,
+      width: 220, height: 320,
       margin: const EdgeInsets.only(right: 16),
-      decoration: BoxDecoration(
-        color: AppColors.darkGray,
-        borderRadius: BorderRadius.circular(16),
-      ),
+      decoration: BoxDecoration(color: AppColors.darkGray, borderRadius: BorderRadius.circular(16)),
     );
   }
 }
 
-// ── Carousel skeleton ─────────────────────────────────────────────────────────
 class _CarouselSkeleton extends StatelessWidget {
   const _CarouselSkeleton();
 
@@ -488,16 +414,12 @@ class _CarouselSkeleton extends StatelessWidget {
     return Container(
       height: height,
       color: AppColors.darkGray,
-      child: Center(
-        child: CircularProgressIndicator(
-          valueColor: AlwaysStoppedAnimation<Color>(AppColors.niorRed),
-        ),
-      ),
+      child: Center(child: CircularProgressIndicator(
+          valueColor: AlwaysStoppedAnimation<Color>(AppColors.niorRed))),
     );
   }
 }
 
-// ── Placeholder for screens not built yet ────────────────────────────────────
 class _PlaceholderScreen extends StatelessWidget {
   final String label;
   const _PlaceholderScreen({required this.label});
@@ -506,14 +428,8 @@ class _PlaceholderScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.black,
-      body: Center(
-        child: Text(
-          label,
-          style: AppTextStyles.header3.copyWith(
-            color: AppColors.ashGray,
-          ),
-        ),
-      ),
+      body: Center(child: Text(label,
+          style: AppTextStyles.header3.copyWith(color: AppColors.ashGray))),
     );
   }
 }

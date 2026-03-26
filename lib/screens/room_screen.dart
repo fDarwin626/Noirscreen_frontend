@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:noirscreen/screens/waiting_room_screen.dart';
 import 'package:noirscreen/services/rooms_service.dart';
 import '../constants/app_colors.dart';
 import '../constants/app_text_style.dart';
@@ -172,19 +173,28 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
     );
   }
 
+  // ── CHANGED: now delegates to _ScheduledRoomCard (StatefulWidget) ──────────
   Widget _buildScheduledRoomCard(ScheduledRoomModel room) {
-    final now = DateTime.now();
-    final timeUntil = room.scheduledAt.difference(now);
-    final isActive = room.status == 'active';
-    final isSoon = timeUntil.inMinutes <= 30 && timeUntil.inMinutes > 0;
-
-    return GestureDetector(
+    return _ScheduledRoomCard(
+      room: room,
+      currentUser: _currentUser,
+      onCancel: () => _showCancelDialog(room),
       onTap: () {
-        if (!isActive) return;
         if (_currentUser == null) return;
-
         final isOwner = room.hostId == _currentUser!.userId;
-
+        if (room.status != 'active') {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => WaitingRoomScreen(
+                room: room,
+                currentUser: _currentUser!,
+                isOwner: isOwner,
+              ),
+            ),
+          );
+          return;
+        }
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -200,220 +210,7 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
           ),
         );
       },
-      child: Container(
-        width: 260,
-        margin: const EdgeInsets.only(right: 12),
-        decoration: BoxDecoration(
-          color: AppColors.darkGray,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isActive
-                ? AppColors.niorRed.withOpacity(0.5)
-                : isSoon
-                ? AppColors.accentGold.withOpacity(0.4)
-                : AppColors.ashGray.withOpacity(0.1),
-            width: 0.8,
-          ),
-        ),
-        child: Stack(
-          children: [
-            if (room.videoThumbnailPath != null)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Opacity(
-                  opacity: 0.35,
-                  child: SizedBox.expand(
-                    child: Image.file(
-                      File(room.videoThumbnailPath!),
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
-                  ),
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildStatusBadge(room.status, isSoon),
-                  const Spacer(),
-                  Text(
-                    room.videoTitle,
-                    style: AppTextStyles.bodyBold.copyWith(
-                      color: AppColors.textWhite,
-                      fontSize: 14,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 6),
-                  _buildCountdown(room, timeUntil, isActive),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Icon(
-                        _streamTypeIcon(room.streamType),
-                        color: AppColors.ashGray,
-                        size: 12,
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        _streamTypeLabel(room.streamType),
-                        style: AppTextStyles.caption.copyWith(
-                          color: AppColors.ashGray,
-                          fontSize: 10,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            Positioned(
-              top: 8,
-              right: 8,
-              child: GestureDetector(
-                onTap: () => _showCancelDialog(room),
-                child: Container(
-                  width: 28,
-                  height: 28,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: AppColors.black.withOpacity(0.6),
-                  ),
-                  child: Icon(
-                    Icons.close_rounded,
-                    color: AppColors.textGray,
-                    size: 16,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
-  }
-
-  Widget _buildStatusBadge(String status, bool isSoon) {
-    Color color;
-    String label;
-    if (status == 'active') {
-      color = AppColors.niorRed;
-      label = '● LIVE';
-    } else if (isSoon) {
-      color = AppColors.accentGold;
-      label = '⏰ SOON';
-    } else {
-      color = AppColors.ashGray;
-      label = 'SCHEDULED';
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withOpacity(0.4), width: 0.6),
-      ),
-      child: Text(
-        label,
-        style: AppTextStyles.caption.copyWith(
-          color: color,
-          fontSize: 9,
-          letterSpacing: 1,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCountdown(
-    ScheduledRoomModel room,
-    Duration timeUntil,
-    bool isActive,
-  ) {
-    if (isActive) {
-      return Text(
-        'Room is live now',
-        style: AppTextStyles.caption.copyWith(
-          color: AppColors.niorRed,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-        ),
-      );
-    }
-
-    if (timeUntil.isNegative) {
-      // Time has passed — waiting for backend activation (up to 30s)
-      // Invalidate provider to check for status update
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) ref.invalidate(scheduledRoomsProvider);
-      });
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 8,
-            height: 8,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.2,
-              color: AppColors.accentGold,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            'Starting...',
-            style: AppTextStyles.caption.copyWith(
-              color: AppColors.accentGold,
-              fontSize: 11,
-            ),
-          ),
-        ],
-      );
-    }
-    
-    String countdown;
-    if (timeUntil.inDays > 0) {
-      countdown =
-          '${timeUntil.inDays}d ${timeUntil.inHours.remainder(24)}h away';
-    } else if (timeUntil.inHours > 0) {
-      countdown =
-          '${timeUntil.inHours}h ${timeUntil.inMinutes.remainder(60)}m away';
-    } else {
-      countdown = '${timeUntil.inMinutes}m away';
-    }
-    return Text(
-      countdown,
-      style: AppTextStyles.caption.copyWith(
-        color: AppColors.textGray,
-        fontSize: 11,
-      ),
-    );
-  }
-
-  IconData _streamTypeIcon(String type) {
-    switch (type) {
-      case 'sync':
-        return Icons.sync_rounded;
-      case 'hls':
-        return Icons.cast_rounded;
-      default:
-        return Icons.stream_rounded;
-    }
-  }
-
-  String _streamTypeLabel(String type) {
-    switch (type) {
-      case 'sync':
-        return 'Sync Watch';
-      case 'hls':
-        return 'Video Stream';
-      case 'audio':
-        return 'Audio Stream';
-      default:
-        return 'Stream';
-    }
   }
 
   void _showCancelDialog(ScheduledRoomModel room) {
@@ -486,6 +283,20 @@ Future<void> _joinViaLink() async {
       if (room == null || !mounted) return;
       if (_currentUser == null) return;
       _joinLinkController.clear();
+      // Room not active yet — go to waiting room
+      if (room.status != 'active') {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => WaitingRoomScreen(
+              room: room,
+              currentUser: _currentUser!,
+              isOwner: false,
+            ),
+          ),
+        );
+        return;
+      }
       Navigator.push(
         context,
         MaterialPageRoute(
@@ -807,8 +618,21 @@ Future<void> _joinViaLink() async {
       ),
     );
   }
+
+  // kept here because _buildCompletedRoomCard still uses it
+  String _streamTypeLabel(String type) {
+    switch (type) {
+      case 'sync':  return 'Sync Watch';
+      case 'hls':   return 'Video Stream';
+      case 'audio': return 'Audio Stream';
+      default:      return 'Stream';
+    }
+  }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// _StreamType data class — unchanged
+// ─────────────────────────────────────────────────────────────────────────────
 class _StreamType {
   final IconData icon;
   final String label;
@@ -821,4 +645,254 @@ class _StreamType {
     required this.subtitle,
     required this.type,
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _ScheduledRoomCard — StatefulWidget that ticks every second so the
+// countdown is always accurate and the thumbnail check is done at render time.
+// ─────────────────────────────────────────────────────────────────────────────
+class _ScheduledRoomCard extends StatefulWidget {
+  final ScheduledRoomModel room;
+  final UserModel? currentUser;
+  final VoidCallback onTap;
+  final VoidCallback onCancel;
+
+  const _ScheduledRoomCard({
+    required this.room,
+    required this.currentUser,
+    required this.onTap,
+    required this.onCancel,
+  });
+
+  @override
+  State<_ScheduledRoomCard> createState() => _ScheduledRoomCardState();
+}
+
+class _ScheduledRoomCardState extends State<_ScheduledRoomCard> {
+  late Timer _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild every second so the countdown always shows the real remaining time
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final timeUntil = widget.room.scheduledAt.difference(now);
+    final isActive = widget.room.status == 'active';
+    final isSoon = timeUntil.inMinutes <= 30 && timeUntil.inMinutes > 0;
+    final room = widget.room;
+
+    // Only render thumbnail if the file actually exists on this device
+    final thumbPath = room.videoThumbnailPath;
+    final hasThumb = thumbPath != null &&
+        thumbPath.isNotEmpty &&
+        File(thumbPath).existsSync();
+
+    return GestureDetector(
+      onTap: widget.onTap,
+      child: Container(
+        width: 260,
+        margin: const EdgeInsets.only(right: 12),
+        decoration: BoxDecoration(
+          color: AppColors.darkGray,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isActive
+                ? AppColors.niorRed.withOpacity(0.5)
+                : isSoon
+                    ? AppColors.accentGold.withOpacity(0.4)
+                    : AppColors.ashGray.withOpacity(0.1),
+            width: 0.8,
+          ),
+        ),
+        child: Stack(
+          children: [
+            // ── Thumbnail background ───────────────────────────────
+            if (hasThumb)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Opacity(
+                  opacity: 0.35,
+                  child: SizedBox.expand(
+                    child: Image.file(
+                      File(thumbPath!),
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                ),
+              ),
+
+            // ── Card content ───────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _statusBadge(room.status, isSoon),
+                  const Spacer(),
+                  Text(
+                    room.videoTitle,
+                    style: AppTextStyles.bodyBold.copyWith(
+                      color: AppColors.textWhite,
+                      fontSize: 14,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 6),
+                  _countdown(timeUntil, isActive),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Icon(_typeIcon(room.streamType),
+                          color: AppColors.ashGray, size: 12),
+                      const SizedBox(width: 5),
+                      Text(
+                        _typeLabel(room.streamType),
+                        style: AppTextStyles.caption.copyWith(
+                          color: AppColors.ashGray,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            // ── Cancel button ──────────────────────────────────────
+            Positioned(
+              top: 8,
+              right: 8,
+              child: GestureDetector(
+                onTap: widget.onCancel,
+                child: Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: AppColors.black.withOpacity(0.6),
+                  ),
+                  child: Icon(Icons.close_rounded,
+                      color: AppColors.textGray, size: 16),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statusBadge(String status, bool isSoon) {
+    Color color;
+    String label;
+    if (status == 'active') {
+      color = AppColors.niorRed;
+      label = '● LIVE';
+    } else if (isSoon) {
+      color = AppColors.accentGold;
+      label = '⏰ SOON';
+    } else {
+      color = AppColors.ashGray;
+      label = 'SCHEDULED';
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withOpacity(0.4), width: 0.6),
+      ),
+      child: Text(
+        label,
+        style: AppTextStyles.caption.copyWith(
+          color: color,
+          fontSize: 9,
+          letterSpacing: 1,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _countdown(Duration timeUntil, bool isActive) {
+    if (isActive) {
+      return Text(
+        'Room is live now',
+        style: AppTextStyles.caption.copyWith(
+          color: AppColors.niorRed,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+        ),
+      );
+    }
+    if (timeUntil.isNegative) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 8,
+            height: 8,
+            child: CircularProgressIndicator(
+                strokeWidth: 1.2, color: AppColors.accentGold),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            'Starting...',
+            style: AppTextStyles.caption.copyWith(
+              color: AppColors.accentGold,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      );
+    }
+    final String label;
+    if (timeUntil.inDays > 0) {
+      label = '${timeUntil.inDays}d ${timeUntil.inHours.remainder(24)}h away';
+    } else if (timeUntil.inHours > 0) {
+      label =
+          '${timeUntil.inHours}h ${timeUntil.inMinutes.remainder(60)}m away';
+    } else {
+      // Under 1 hour: show minutes and seconds so user sees it ticking
+      final m = timeUntil.inMinutes;
+      final s = timeUntil.inSeconds.remainder(60);
+      label = m > 0 ? '${m}m ${s}s away' : '${s}s away';
+    }
+    return Text(
+      label,
+      style: AppTextStyles.caption
+          .copyWith(color: AppColors.textGray, fontSize: 11),
+    );
+  }
+
+  IconData _typeIcon(String type) {
+    switch (type) {
+      case 'sync':  return Icons.sync_rounded;
+      case 'hls':   return Icons.cast_rounded;
+      default:      return Icons.stream_rounded;
+    }
+  }
+
+  String _typeLabel(String type) {
+    switch (type) {
+      case 'sync':  return 'Sync Watch';
+      case 'hls':   return 'Video Stream';
+      case 'audio': return 'Audio Stream';
+      default:      return 'Stream';
+    }
+  }
 }

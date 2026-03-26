@@ -49,7 +49,7 @@ class HlsChunkerService {
       return;
     }
 
-    _videoPath = videoPath;
+    _videoPath = await _prepareVideoPath(videoPath);
     _roomId = roomId;
     _isRunning = true;
 
@@ -90,6 +90,8 @@ class HlsChunkerService {
   // the next 60 seconds of chunks are always ready
   Future<void> _tick() async {
     if (!_isRunning || _videoPath == null || _roomId == null) return;
+    // Reset any Stale FFmpeg before each session tick to prevent memory leaks
+    FFmpegKit.cancel();
 
     try {
       final positionSeconds = await _getCurrentPosition();
@@ -140,26 +142,34 @@ class HlsChunkerService {
         durationSeconds: _chunkDurationSeconds,
       );
 
-      if (!success) {
+
+if (!success) {
         print('❌ HLS CHUNKER: Failed to generate chunk $i');
         continue;
       }
 
-      // Upload chunk to backend
-      final uploaded = await _uploadChunk(
-        chunkFile: File(chunkPath),
-        chunkIndex: i,
-      );
+      // Upload chunk with up to 3 retries — handles Render connection resets
+      bool uploaded = false;
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        uploaded = await _uploadChunk(
+          chunkFile: File(chunkPath),
+          chunkIndex: i,
+        );
+        if (uploaded) break;
+        if (attempt < 3) {
+          print('⚠️ HLS CHUNKER: Retry $attempt for chunk $i');
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      }
 
       if (uploaded) {
         _lastUploadedChunk = i;
-        // Delete local chunk after upload — saves device storage
         final file = File(chunkPath);
         if (await file.exists()) await file.delete();
         print('✅ HLS CHUNKER: Chunk $i uploaded and cleaned');
       } else {
-        print('❌ HLS CHUNKER: Upload failed for chunk $i — will retry');
-        break; // Stop and retry on next tick
+        print('❌ HLS CHUNKER: Upload failed for chunk $i after 3 attempts — will retry next tick');
+        break;
       }
     }
   }
@@ -176,28 +186,49 @@ class HlsChunkerService {
     required int startSeconds,
     required int durationSeconds,
   }) async {
-    final command =
-        '-ss $startSeconds '
-        '-i "$inputPath" '
-        '-t $durationSeconds '
-        '-c copy '
-        '-f mpegts '
-        '"$outputPath"';
 
-    final session = await FFmpegKit.execute(command);
-    final returnCode = await session.getReturnCode();
 
-    if (!ReturnCode.isSuccess(returnCode)) {
-      final logs = await session.getAllLogs();
-      for (final log in logs) {
-        print('ffmpeg: ${log.getMessage()}');
-      }
-      return false;
-    }
+final command =
+    '-i "$inputPath" '
+    '-ss $startSeconds '
+    '-t $durationSeconds '
+    '-c copy '
+    '-f mpegts '
+    '"$outputPath"';
 
-    return true;
+final session = await FFmpegKit.execute(command);
+final returnCode = await session.getReturnCode();
+if (ReturnCode.isSuccess(returnCode)) return true;
+
+// First attempt failed — retry with h264_mp4toannexb for H.264 sources
+// that need the Annex B bitstream conversion
+print('⚠️ HLS CHUNKER: First attempt failed for chunk, retrying with h264 bsf...');
+if (await File(outputPath).exists()) await File(outputPath).delete();
+
+final fallbackCommand =
+    '-i "$inputPath" '
+    '-ss $startSeconds '
+    '-t $durationSeconds '
+    '-c copy '
+    '-bsf:v h264_mp4toannexb '
+    '-f mpegts '
+    '"$outputPath"';
+
+final session2 = await FFmpegKit.execute(fallbackCommand);
+final returnCode2 = await session2.getReturnCode();
+
+if (!ReturnCode.isSuccess(returnCode2)) {
+  final logs = await session2.getAllLogs();
+  for (final log in logs) {
+    print('ffmpeg: ${log.getMessage()}');
   }
+  return false;
+}
 
+return true;
+
+
+  }
   // ── Upload a chunk file to the backend ────────────────────────────────────
   Future<bool> _uploadChunk({
     required File chunkFile,
@@ -288,6 +319,24 @@ class HlsChunkerService {
     const exts = ['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'];
     return exts.contains(path.split('.').last.toLowerCase());
   }
+
+Future<String> _prepareVideoPath(String inputPath) async {
+  if (!inputPath.toLowerCase().endsWith('.mkv')) return inputPath;
+  final appDir = await getTemporaryDirectory();
+  final remuxPath = '${appDir.path}/remuxed_${_roomId}.mp4';
+  if (File(remuxPath).existsSync()) return remuxPath;
+  print('🔄 HLS CHUNKER: Remuxing MKV to MP4 for compatibility...');
+  final cmd = '-i "$inputPath" -c copy -f mp4 "$remuxPath"';
+  final session = await FFmpegKit.execute(cmd);
+  final rc = await session.getReturnCode();
+  if (ReturnCode.isSuccess(rc)) {
+    print('✅ HLS CHUNKER: Remux complete → $remuxPath');
+    return remuxPath;
+  }
+  print('⚠️ HLS CHUNKER: Remux failed, using original path');
+  return inputPath;
+}
+
 
   // ── Stop chunking — called when room ends ─────────────────────────────────
   Future<void> stop() async {

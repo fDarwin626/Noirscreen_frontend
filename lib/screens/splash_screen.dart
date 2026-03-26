@@ -161,11 +161,18 @@ void _startSequence() async {
         await authService.clearUserId();
         _navigateTo(const OnboardingScreen());
       }
-    } catch (e) {
-      // Network down or any error — default to onboarding
-      // Never block the user on an error screen
+      } catch (e) {
+      // Network down or any error
       print('❌ SPLASH: $e');
-      _navigateTo(const OnboardingScreen());
+      // If we have a saved userId assume user is registered
+      // and go home — do not send to onboarding on network errors
+      final authService = AuthService();
+      final savedUserId = await authService.getUserId();
+      if (savedUserId != null && savedUserId.isNotEmpty) {
+        _navigateTo(HomeScreen(shouldRefresh: true));
+      } else {
+        _navigateTo(const OnboardingScreen());
+      }
     }
   }
 

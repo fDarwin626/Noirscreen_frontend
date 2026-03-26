@@ -117,10 +117,9 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
       // In NOW mode we add 2min10s — the extra 10s is a buffer so the
       // backend validation (which also checks >= 2 min) does not fail
       // due to the few hundred milliseconds of network travel time
-      final scheduledTime = _isScheduled
+       final scheduledTime = _isScheduled
           ? _selectedDateTime
-          : now.add(const Duration(minutes: 2, seconds: 10));
-
+          : now.add(Duration(minutes: _minutesFromNow, seconds: 10));
       // Only validate minimum time in SCHEDULE mode
       // In NOW mode the time is always now + 2min10s so it always passes
       if (_isScheduled && scheduledTime.difference(now).inMinutes < 2) {
@@ -151,6 +150,7 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
         // owner taps the live card the video player knows which file to play
         setState(() => _createdRoom = room.copyWith(
           videoFilePath: widget.video.filePath,
+          videoThumbnailPath: widget.video.thumbnailPath,
         ));
       }
     } catch (e) {
@@ -209,7 +209,7 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
     final picked = await _showTimeScrollPicker(date);
     if (picked == null || !mounted) return;
 
-    if (picked.difference(now).inMinutes < 2) {
+    if (picked.difference(now).inSeconds < 130) {
       _err('Must be at least 2 minutes from now');
       return;
     }
