@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:noirscreen/constants/app_text_style.dart';
 import 'package:noirscreen/screens/home_screen.dart';
 import 'package:noirscreen/screens/onboarding_screen.dart';
 import 'package:noirscreen/services/api_services.dart';
 import 'package:noirscreen/services/auth_service.dart';
+import 'package:noirscreen/services/user_cache_service.dart'; // ← CHANGED: import cache
 import 'dart:math' as math;
 import '../constants/app_colors.dart';
 import '../services/video_manager_service.dart';
@@ -95,7 +97,7 @@ class _SplashScreenState extends State<SplashScreen>
 
   bool _showLoading = false;
 
-void _startSequence() async {
+  void _startSequence() async {
     await Future.delayed(const Duration(milliseconds: 400));
 
     _barWipeController.forward();
@@ -115,14 +117,9 @@ void _startSequence() async {
 
     if (mounted) setState(() => _showLoading = true);
 
-    // Now check auth while loading spinner is visible
     await _checkAuthAndNavigate();
   }
 
-  // Check if user is already registered on this device.
-  // If yes — go to HomeScreen directly.
-  // If no — go to OnboardingScreen as normal.
-  // This fixes the "register again every time" problem.
   Future<void> _checkAuthAndNavigate() async {
     if (!mounted) return;
 
@@ -133,19 +130,19 @@ void _startSequence() async {
       final savedUserId = await authService.getUserId();
 
       if (savedUserId == null || savedUserId.isEmpty) {
-        // No user on device — first time — go to onboarding
+        // No userId on device at all — brand new user, go to onboarding
         _navigateTo(const OnboardingScreen());
         return;
       }
 
-      // userId found — confirm user still exists on backend
-      // Handles dev DB wipes gracefully
+      // getUser() now returns cached user when offline, so:
+      //   - Online + user exists   → fresh user from API  → go home
+      //   - Online + user missing  → null (DB wiped)      → clear & onboarding
+      //   - Offline                → cached user          → go home
       final user = await apiService.getUser(savedUserId);
 
       if (user != null) {
-        // Run silent background scan before going home
-        // quickScan skips existing files — only adds new ones
-        // Errors are swallowed so they never block navigation
+        // Silent background scan — errors never block navigation
         try {
           final videoManager = VideoManagerService();
           await videoManager.quickScan();
@@ -154,18 +151,19 @@ void _startSequence() async {
           print('⚠️ SPLASH: Background scan failed silently - $e');
         }
         _navigateTo(HomeScreen(shouldRefresh: true));
-
       } else {
-        // userId saved but backend has no record — DB was wiped
-        // Clear the stale id and send to onboarding
+        // Only reach here when we ARE online and the backend has no record.
+        // (If offline, getUser returns the cache, never null.)
+        // Clear everything stale and send to onboarding.
         await authService.clearUserId();
+        await UserCacheService().clearUser(); // ← CHANGED: also clear user cache
+        print('⚠️ SPLASH: User not found on backend — clearing and going to onboarding');
         _navigateTo(const OnboardingScreen());
       }
-      } catch (e) {
-      // Network down or any error
-      print('❌ SPLASH: $e');
-      // If we have a saved userId assume user is registered
-      // and go home — do not send to onboarding on network errors
+    } catch (e) {
+      // Unexpected error (shouldn't normally hit here since getUser swallows
+      // network errors and returns cache, but kept as a safety net).
+      print('❌ SPLASH: Unexpected error — $e');
       final authService = AuthService();
       final savedUserId = await authService.getUserId();
       if (savedUserId != null && savedUserId.isNotEmpty) {
@@ -190,6 +188,7 @@ void _startSequence() async {
       ),
     );
   }
+
   @override
   void dispose() {
     _barWipeController.dispose();
@@ -241,7 +240,6 @@ void _startSequence() async {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // ── Your logo image ──────────────────────────────────────
                 AnimatedBuilder(
                   animation: _logoController,
                   builder: (context, _) {
@@ -337,25 +335,23 @@ void _startSequence() async {
           ),
 
           Positioned(top: 40, left: 32, child: _CornerBracket(flip: false)),
-
           Positioned(bottom: 40, right: 32, child: _CornerBracket(flip: true)),
-        
-        // Loading  Spinner bottom
-        if (_showLoading)
-          Positioned(
-            bottom: 80,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
-                  valueColor: AlwaysStoppedAnimation(AppColors.niorRed),
+
+          if (_showLoading)
+            Positioned(
+              bottom: 80,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    valueColor: AlwaysStoppedAnimation(AppColors.niorRed),
+                  ),
                 ),
               ),
-            ),
             ),
         ],
       ),

@@ -126,11 +126,29 @@ class _WaitingRoomScreenState extends ConsumerState<WaitingRoomScreen>
   // ── Init voice chat in waiting room ────────────────────────────────────────
   Future<void> _initVoice() async {
     try {
+      // Initialize WebRTC BEFORE connecting socket
+      // onParticipantJoined fires immediately on connect and needs _webrtc ready
+      _webrtc = WebRTCService(
+        localUserId: widget.currentUser.userId,
+        watchService: RoomWatchService(roomId: '', userId: '', isOwner: false),
+        onSpeakingChanged: (uid, speaking) {
+          if (!mounted) return;
+          setState(() {
+            final idx = _participants.indexWhere((p) => p.userId == uid);
+            if (idx != -1) _participants[idx].isSpeaking = speaking;
+          });
+        },
+        onPeerDisconnected: (uid) => print('📡 WEBRTC WAIT: $uid disconnected'),
+      );
+      await _webrtc!.initialize();
+
       final service = RoomWatchService(
         roomId: widget.room.roomId,
         userId: widget.currentUser.userId,
         isOwner: widget.isOwner,
       );
+
+      _webrtc!.rewireWatchService(service);
 
       await service.connect(
         onPlay: (_) {},
@@ -192,24 +210,7 @@ class _WaitingRoomScreenState extends ConsumerState<WaitingRoomScreen>
         },
       );
       if (mounted) {
-  // Initialize WebRTC FIRST — same fix as watch screen
-  // Prevents null _webrtc when participant_joined fires early
-  _webrtc = WebRTCService(
-    localUserId: widget.currentUser.userId,
-    watchService: service,
-    onSpeakingChanged: (uid, speaking) {
-      if (!mounted) return;
-      setState(() {
-        final idx = _participants.indexWhere((p) => p.userId == uid);
-        if (idx != -1) _participants[idx].isSpeaking = speaking;
-      });
-    },
-    onPeerDisconnected: (uid) => print('📡 WEBRTC WAIT: $uid disconnected'),
-  );
-  await _webrtc!.initialize();
-
-  // Set service only after webrtc is ready
-  setState(() => _watchService = service);
+        setState(() => _watchService = service);
 }
 
     } catch (e) {
@@ -286,13 +287,18 @@ class _WaitingRoomScreenState extends ConsumerState<WaitingRoomScreen>
   }
 
 void _startPolling() {
-    // Poll every 10s for viewer, 15s for host
-    // Viewer uses direct API call — not provider (provider only has host's rooms)
+    // Poll every 3s for guest — reduces the window between host pressing
+    // START NOW and the guest being navigated to watch screen.
+    // Old 10s poll meant guest could wait up to 10 extra seconds on a
+    // blank waiting screen after host had already started. 3s is fast
+    // enough to feel instant without hammering the backend.
+    // Host keeps 15s — they navigate themselves via _hostStartNow().
     _pollTimer = Timer.periodic(
-      Duration(seconds: widget.isOwner ? 15 : 10),
+      Duration(seconds: widget.isOwner ? 15 : 3),
       (_) { if (mounted) _checkAndNavigate(); },
     );
   }
+
 
   Future<void> _checkAndNavigate() async {
     if (_navigating || !mounted) return;
@@ -317,39 +323,49 @@ void _startPolling() {
     }
   }
 
-  Future<void> _navigateToWatch(ScheduledRoomModel room) async {
-    if (_navigating || !mounted) return;
-    _navigating = true;
-    _countdownTimer?.cancel();
-    _pollTimer?.cancel();
 
-    // Disconnect voice before handing off to watch screen
-    // Watch screen will re-init its own socket + WebRTC
-    _watchService?.disconnect();
-    await _webrtc?.dispose();
+    Future<void> _navigateToWatch(ScheduledRoomModel room) async {
+  if (_navigating || !mounted) return;
+  _navigating = true;
+  _countdownTimer?.cancel();
+  _pollTimer?.cancel();
 
-    if (!mounted) return;
+  // Dispose WebRTC properly before navigating.
+  // NOT disposing caused the OS audio session to remain open from the
+  // waiting room WebRTC instance. When RoomWatchScreen called
+  // WebRTCService.initialize() it hit the 'reuse existing stream' branch
+  // and reused a stream whose socket signaling was now broken (because
+  // silentDisconnect closed the socket). Result: audio worked for nobody.
+  // Disposing here closes the OS audio session cleanly so the watch
+  // screen opens a fresh one with a working signaling channel.
+  await _webrtc?.dispose();
+  _watchService?.silentDisconnect();
 
-    Navigator.pushReplacement(
-      context,
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 400),
-        pageBuilder: (_, __, ___) => RoomWatchScreen(
-          room: room,
-          currentUser: widget.currentUser,
-          isOwner: widget.isOwner,
-          localFilePath: widget.isOwner ? room.videoFilePath : null,
-          hlsStreamUrl: widget.isOwner
-              ? null
-              : '${ApiService.baseUrl}/api/rooms/${room.roomId}/stream.m3u8',
-        ),
-        transitionsBuilder: (_, anim, __, child) => FadeTransition(
-          opacity: CurvedAnimation(parent: anim, curve: Curves.easeIn),
-          child: child,
-        ),
+  if (!mounted) return;
+
+  Navigator.pushReplacement(
+    context,
+    PageRouteBuilder(
+      transitionDuration: const Duration(milliseconds: 400),
+      pageBuilder: (_, __, ___) => RoomWatchScreen(
+        room: room,
+        currentUser: widget.currentUser,
+        isOwner: widget.isOwner,
+        localFilePath: widget.isOwner ? room.videoFilePath : null,
+        hlsStreamUrl: widget.isOwner
+            ? null
+            : '${ApiService.baseUrl}/api/rooms/${room.roomId}/stream.m3u8',
       ),
-    );
-  }
+
+      transitionsBuilder: (_, anim, __, child) => FadeTransition(
+        opacity: CurvedAnimation(parent: anim, curve: Curves.easeIn),
+        child: child,
+      ),
+    ),
+  );
+}
+
+
 
   Future<void> _hostStartNow() async {
     if (_isStarting || !mounted) return;
@@ -383,10 +399,12 @@ void _startPolling() {
     _watchService?.disconnect();
     _webrtc?.dispose();
     for (final r in _activeReactions) r.controller.dispose();
-    if (!_navigating) {
-      SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
-    }
+    // Clear all orientation locks — let the next screen set its own
+    SystemChrome.setPreferredOrientations([]);
+    SystemChrome.setEnabledSystemUIMode(
+      SystemUiMode.edgeToEdge,
+      overlays: SystemUiOverlay.values,
+    );
     super.dispose();
   }
 
@@ -408,11 +426,24 @@ void _startPolling() {
         fit: StackFit.expand,
         children: [
           // ── Thumbnail ──────────────────────────────────────────────────────
+
             AnimatedBuilder(
             animation: _expandAnimation,
             builder: (context, child) {
-              final hPad = (1 - _expandAnimation.value) * size.width * 0.18;
-              final vPad = (1 - _expandAnimation.value) * size.height * 0.14;
+              // When _expandAnimation.value is 0 (not expanding yet),
+              // hPad/vPad are at their MAX — 18% and 14% of screen.
+              // This meant on first paint the thumbnail was inset from all
+              // sides and the remaining area was black.
+              // Fix: start the thumbnail already filling the screen (hPad=0,
+              // vPad=0) and animate outward only when actually expanding.
+              // The thumbnail should always fill the background — the
+              // expanding animation is just the zoom-to-fullscreen effect.
+              final hPad = _isExpanding
+                  ? (1 - _expandAnimation.value) * size.width * 0.18
+                  : 0.0;
+              final vPad = _isExpanding
+                  ? (1 - _expandAnimation.value) * size.height * 0.14
+                  : 0.0;
               return Positioned(left: hPad, right: hPad, top: vPad, bottom: vPad, child: child!);
             },
             child: ClipRRect(

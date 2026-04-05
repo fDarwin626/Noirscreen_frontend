@@ -1,51 +1,44 @@
 import 'dart:core';
-
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
-
+import 'package:noirscreen/services/user_cache_service.dart'; // ← CHANGED: import cache
 
 class AuthService {
-  // Secure storage instance for user ID (encrypted)
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
   final _uuid = const Uuid();
 
-  // Strorage key for user ID
   static const String _userIdKey = 'user_id';
 
-  // generate a new user ID and store it securely
-  String  generateUserId(){
+  String generateUserId() {
     return _uuid.v4();
   }
 
-  // Save user ID to secure storage
   Future<void> saveUserId(String userId) async {
     await _secureStorage.write(key: _userIdKey, value: userId);
   }
 
-  // Retrieve user ID from secure storage
   Future<String?> getUserId() async {
     return await _secureStorage.read(key: _userIdKey);
   }
 
-// Clears the saved userId (used when backend cannot find user)
-Future<void>clearUserId()async{
-  await _secureStorage.delete(key: 'user_id');
-}
+  Future<void> clearUserId() async {
+    await _secureStorage.delete(key: 'user_id');
+  }
 
-  // Check if user is authenticated (has user ID saved)
   Future<bool> isAuthenticated() async {
     final userId = await getUserId();
     return userId != null && userId.isNotEmpty;
   }
-  
-  // Delete user ID (logout / account deletion)
+
   Future<void> deleteUserId() async {
     await _secureStorage.delete(key: _userIdKey);
   }
-  
-  // Clear all secure storage (full reset)
+
+  /// Full reset — wipes both the secure userId AND the cached user profile.
+  /// Call this on logout or account deletion.
   Future<void> clearAll() async {
     await _secureStorage.deleteAll();
+    await UserCacheService().clearUser(); // ← CHANGED: keep both storages in sync
+    print('🔐 AUTH: All auth data and user cache cleared');
   }
-
 }

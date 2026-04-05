@@ -32,14 +32,18 @@ class RoomWatchService {
     required void Function(String userId, String emoji) onReaction,
   }) async {
     try {
-      _socket = IO.io(
-        ApiService.baseUrl,
-        IO.OptionBuilder()
-            .setTransports(['websocket'])
-            .disableAutoConnect()
-            .setQuery({'userId': userId, 'roomId': roomId})
-            .build(),
-      );
+
+
+_socket = IO.io(
+  ApiService.baseUrl,
+  IO.OptionBuilder()
+      .setTransports(['websocket'])
+      .disableAutoConnect()
+      .disableReconnection()
+      .setTimeout(20000)
+      .setQuery({'userId': userId, 'roomId': roomId})
+      .build(),
+);
 
       _socket!.connect();
 
@@ -52,10 +56,13 @@ class RoomWatchService {
         });
       });
 
-      _socket!.onDisconnect((_) {
+            _socket!.onDisconnect((_) {
         _connected = false;
         print('⚠️ ROOM SERVICE: Disconnected from room $roomId');
       });
+
+
+
 
       _socket!.onConnectError((data) {
         print('❌ ROOM SERVICE: Connection error - $data');
@@ -265,7 +272,7 @@ class RoomWatchService {
   }
 
   // Send reaction emoji to all room participants
-  void sendReaction(String emoji) {
+void sendReaction(String emoji) {
     if (!_connected) return;
     _socket!.emit('reaction', {
       'roomId': roomId,
@@ -273,6 +280,18 @@ class RoomWatchService {
     });
   }
 
+  // Called by guest after video controller is ready.
+  // Re-emits join_room so server sends a fresh sync_state with
+  // the current real position — fixes guest stuck at 0s.
+  void requestResync() {
+    if (!_connected) return;
+    print('🔄 ROOM SERVICE: Requesting fresh sync_state');
+    _socket!.emit('join_room', {
+      'roomId': roomId,
+      'userId': userId,
+    });
+  }
+  
   void disconnect() {
     if (_connected) {
       _socket!.emit('leave_room', {

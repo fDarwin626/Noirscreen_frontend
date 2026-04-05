@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:app_links/app_links.dart';
 import 'package:noirscreen/constants/app_colors.dart';
 import 'package:noirscreen/screens/splash_screen.dart';
-import 'package:noirscreen/screens/home_screen.dart';
 import 'package:noirscreen/screens/room_watch_screen.dart';
 import 'package:noirscreen/screens/waiting_room_screen.dart';
 import 'package:noirscreen/services/rooms_service.dart';
@@ -14,25 +13,20 @@ import 'package:noirscreen/services/api_services.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // BUG 3 FIX: make the app draw edge-to-edge so our bottom nav bar sits
-  // ABOVE the system navigation bar (circle/square/triangle buttons) instead
-  // of being hidden behind it. Flutter will report the correct bottom inset
-  // via MediaQuery.padding.bottom so our nav bar padding adjusts automatically.
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light,
-    // Transparent nav bar so our dark bottom nav shows through cleanly
-    systemNavigationBarColor: Colors.transparent,
-    systemNavigationBarDividerColor: Colors.transparent,
-    systemNavigationBarIconBrightness: Brightness.light,
-  ));
-
-  // Tell Android to draw behind the system bars (edge-to-edge)
+SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.light,
+  statusBarBrightness: Brightness.dark,
+  systemNavigationBarColor: Colors.transparent, 
+  systemNavigationBarDividerColor: Colors.transparent,
+  systemNavigationBarIconBrightness: Brightness.light,
+));
   SystemChrome.setEnabledSystemUIMode(
     SystemUiMode.edgeToEdge,
   );
 
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
   runApp(
     const ProviderScope(
       child: NoirScreenApp(),
@@ -65,11 +59,10 @@ class _NoirScreenAppState extends State<NoirScreenApp> {
 
   Future<void> _handleDeepLink(Uri uri) async {
     if (uri.scheme != 'noirscreen' || uri.host != 'room') return;
-
     final roomId = uri.pathSegments.isNotEmpty ? uri.pathSegments.first : null;
     if (roomId == null || roomId.isEmpty) return;
 
-    print('🔗 DEEP LINK: Received room link for $roomId');
+    print('🔗 DEEP LINK: room $roomId');
 
     try {
       final roomsService = RoomsService();
@@ -81,26 +74,28 @@ class _NoirScreenAppState extends State<NoirScreenApp> {
       final user = await apiService.getUser(userId);
       if (user == null) return;
 
-      final link = 'noirscreen://room/$roomId';
-      final room = await roomsService.joinViaLink(link);
+      final room = await roomsService.joinViaLink('noirscreen://room/$roomId');
       if (room == null) return;
 
       if (room.status != 'active') {
         _navigatorKey.currentState?.push(MaterialPageRoute(
           builder: (_) => WaitingRoomScreen(
-            room: room, currentUser: user, isOwner: false),
+              room: room, currentUser: user, isOwner: false),
         ));
         return;
       }
       _navigatorKey.currentState?.push(MaterialPageRoute(
         builder: (_) => RoomWatchScreen(
-          room: room, currentUser: user, isOwner: false,
+          room: room,
+          currentUser: user,
+          isOwner: false,
           localFilePath: null,
-          hlsStreamUrl: '${ApiService.baseUrl}/api/rooms/${room.roomId}/stream.m3u8',
+          hlsStreamUrl:
+              '${ApiService.baseUrl}/api/rooms/${room.roomId}/stream.m3u8',
         ),
       ));
     } catch (e) {
-      print('❌ DEEP LINK: Error handling link - $e');
+      print('❌ DEEP LINK: $e');
     }
   }
 

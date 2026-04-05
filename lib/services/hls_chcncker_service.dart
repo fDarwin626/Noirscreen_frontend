@@ -21,6 +21,7 @@ class HlsChunkerService {
   String? _videoPath;
   Timer? _uploadTimer;
   bool _isRunning = false;
+  String? _cachedVideoCodec; // probe once, reuse for all chunks
 
   // Tracks the highest chunk index we have uploaded so far
   int _lastUploadedChunk = -1;
@@ -180,55 +181,112 @@ if (!success) {
   // -c copy = NO re-encoding — just splitting at keyframes
   //           This is what keeps the phone cool and battery healthy.
   //           Re-encoding would be 10x more CPU intensive.
-  Future<bool> _generateChunk({
-    required String inputPath,
-    required String outputPath,
-    required int startSeconds,
-    required int durationSeconds,
-  }) async {
 
+Future<bool> _generateChunk({
+  required String inputPath,
+  required String outputPath,
+  required int startSeconds,
+  required int durationSeconds,
+}) async {
 
-final command =
-    '-i "$inputPath" '
-    '-ss $startSeconds '
-    '-t $durationSeconds '
-    '-c copy '
-    '-f mpegts '
-    '"$outputPath"';
-
-final session = await FFmpegKit.execute(command);
-final returnCode = await session.getReturnCode();
-if (ReturnCode.isSuccess(returnCode)) return true;
-
-// First attempt failed — retry with h264_mp4toannexb for H.264 sources
-// that need the Annex B bitstream conversion
-print('⚠️ HLS CHUNKER: First attempt failed for chunk, retrying with h264 bsf...');
-if (await File(outputPath).exists()) await File(outputPath).delete();
-
-final fallbackCommand =
-    '-i "$inputPath" '
-    '-ss $startSeconds '
-    '-t $durationSeconds '
-    '-c copy '
-    '-bsf:v h264_mp4toannexb '
-    '-f mpegts '
-    '"$outputPath"';
-
-final session2 = await FFmpegKit.execute(fallbackCommand);
-final returnCode2 = await session2.getReturnCode();
-
-if (!ReturnCode.isSuccess(returnCode2)) {
-  final logs = await session2.getAllLogs();
-  for (final log in logs) {
-    print('ffmpeg: ${log.getMessage()}');
+  // Use cached codec — probing every chunk wastes 200-400ms per chunk
+  if (_cachedVideoCodec == null) {
+    try {
+      final probeSession = await FFprobeKit.getMediaInformation(inputPath);
+      final info = probeSession.getMediaInformation();
+      if (info != null) {
+        final streams = info.getStreams();
+        if (streams != null) {
+          for (final stream in streams) {
+            if (stream.getType()?.toLowerCase() == 'video') {
+              _cachedVideoCodec = stream.getCodec()?.toLowerCase() ?? 'unknown';
+              break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print('⚠️ HLS CHUNKER: Codec probe failed - $e');
+    }
+    _cachedVideoCodec ??= 'unknown';
+    print('🎬 HLS CHUNKER: Detected video codec = $_cachedVideoCodec');
   }
-  return false;
+  final String videoCodec = _cachedVideoCodec!;
+  // Step 2: Choose command based on codec
+  // H.264 → copy stream + h264_mp4toannexb filter (converts MP4 to MPEG-TS bitstream)
+  // HEVC/H.265 → copy stream + hevc_mp4toannexb filter (same idea, correct filter)
+  // Unknown/other → re-encode to H.264 (slowest but guaranteed to work)
+  String command;
+
+  if (videoCodec.contains('h264') || videoCodec.contains('avc')) {
+    // H.264 — fast copy with correct bsf
+    command =
+        '-ss $startSeconds '
+        '-i "$inputPath" '
+        '-t $durationSeconds '
+        '-c copy '
+        '-bsf:v h264_mp4toannexb '
+        '-f mpegts '
+        '"$outputPath"';
+    print('✅ HLS CHUNKER: Using H.264 copy path');
+  } else if (videoCodec.contains('hevc') || videoCodec.contains('h265') || videoCodec.contains('265')) {
+    // HEVC/H.265 — fast copy with hevc_mp4toannexb
+    command =
+        '-ss $startSeconds '
+        '-i "$inputPath" '
+        '-t $durationSeconds '
+        '-c copy '
+        '-bsf:v hevc_mp4toannexb '
+        '-f mpegts '
+        '"$outputPath"';
+    print('✅ HLS CHUNKER: Using HEVC copy path');
+  } else {
+    // Unknown codec — re-encode to H.264 baseline
+    // Slower but works for AV1, VP9, or anything exotic
+    command =
+        '-ss $startSeconds '
+        '-i "$inputPath" '
+        '-t $durationSeconds '
+        '-c:v libx264 -preset ultrafast -crf 28 '
+        '-c:a aac -b:a 128k '
+        '-f mpegts '
+        '"$outputPath"';
+    print('⚠️ HLS CHUNKER: Unknown codec — re-encoding to H.264');
+  }
+
+  final session = await FFmpegKit.execute(command);
+  final returnCode = await session.getReturnCode();
+
+  if (ReturnCode.isSuccess(returnCode)) return true;
+
+  // Step 3: First attempt failed — last resort full re-encode
+  // This catches edge cases like corrupted headers or unusual container quirks
+  print('⚠️ HLS CHUNKER: First attempt failed, trying full re-encode as last resort...');
+  if (await File(outputPath).exists()) await File(outputPath).delete();
+
+  final fallbackCommand =
+      '-ss $startSeconds '
+      '-i "$inputPath" '
+      '-t $durationSeconds '
+      '-c:v libx264 -preset ultrafast -crf 28 '
+      '-c:a aac -b:a 128k '
+      '-f mpegts '
+      '"$outputPath"';
+
+  final session2 = await FFmpegKit.execute(fallbackCommand);
+  final returnCode2 = await session2.getReturnCode();
+
+  if (!ReturnCode.isSuccess(returnCode2)) {
+    final logs = await session2.getAllLogs();
+    for (final log in logs) {
+      print('ffmpeg: ${log.getMessage()}');
+    }
+    return false;
+  }
+
+  return true;
 }
 
-return true;
-
-
-  }
   // ── Upload a chunk file to the backend ────────────────────────────────────
   Future<bool> _uploadChunk({
     required File chunkFile,
@@ -321,26 +379,32 @@ return true;
   }
 
 Future<String> _prepareVideoPath(String inputPath) async {
+  // Only remux MKV — MP4 and others go straight to chunking
   if (!inputPath.toLowerCase().endsWith('.mkv')) return inputPath;
+
   final appDir = await getTemporaryDirectory();
   final remuxPath = '${appDir.path}/remuxed_${_roomId}.mp4';
   if (File(remuxPath).existsSync()) return remuxPath;
-  print('🔄 HLS CHUNKER: Remuxing MKV to MP4 for compatibility...');
-  final cmd = '-i "$inputPath" -c copy -f mp4 "$remuxPath"';
+
+  print('🔄 HLS CHUNKER: Remuxing MKV → MP4 (keeping original codec)...');
+
+  // -c copy keeps HEVC/H.264/AAC streams untouched — just changes container
+  final cmd = '-i "$inputPath" -c:v copy -c:a aac -b:a 128k -movflags faststart -f mp4 "$remuxPath"';
   final session = await FFmpegKit.execute(cmd);
   final rc = await session.getReturnCode();
+
   if (ReturnCode.isSuccess(rc)) {
     print('✅ HLS CHUNKER: Remux complete → $remuxPath');
     return remuxPath;
   }
-  print('⚠️ HLS CHUNKER: Remux failed, using original path');
+  print('⚠️ HLS CHUNKER: Remux failed, using original MKV path');
   return inputPath;
 }
-
 
   // ── Stop chunking — called when room ends ─────────────────────────────────
   Future<void> stop() async {
     _isRunning = false;
+    _cachedVideoCodec = null; // reset for next session
     _uploadTimer?.cancel();
 
     // Delete local chunks folder on device

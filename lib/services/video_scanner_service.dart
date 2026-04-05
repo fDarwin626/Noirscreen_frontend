@@ -25,6 +25,11 @@ class VideoScannerService {
     '/storage/emulated/0/Pictures',
     '/storage/emulated/0/Videos',
     '/storage/emulated/0/WhatsApp/Media/WhatsApp Video',
+        // Xiaomi/MIUI specific
+    '/storage/emulated/0/MIUI/Gallery',
+    '/storage/emulated/0/Telegram',
+    '/storage/emulated/0/Telegram/Telegram Video',
+
 
     // Emulator paths
     '/sdk_gphone64_x86_64/Download',
@@ -129,23 +134,44 @@ class VideoScannerService {
     return videos;
   }
 
-  bool _isVideoFile(String path) {
+bool _isVideoFile(String path) {
     final lower = path.toLowerCase();
 
-    // BUG 6 FIX: skip Android trash / recycle bin folders
-    // Videos in .Trash, .trashed, or Android/data are not user videos
-    if (lower.contains('/.trash') ||
-        lower.contains('/.trashed') ||
-        lower.contains('/android/data/') ||
-        lower.contains('/.thumbnails') ||
-        lower.contains('/thumbnail')) {
-      return false;
-    }
+    // Skip trash, recycle bins, system folders, and MIUI-specific paths
+    const blockedSegments = [
+      '/.trash',
+      '/.trashed',
+      '/android/data/',
+      '/android/obb/',
+      '/.thumbnails',
+      '/thumbnail',
+      '/miui/gallery/cloud',
+      '/.nomedia',
+      '/com.miui.gallery',
+      '/com.xiaomi',
+      '/.recycle',
+      '/recently_deleted',
+      '/miui/.gallery_data',
+      '/alarms/',
+      '/ringtones/',
+      '/notifications/',
+      '/bluetooth/',
+      '/.tmp',
+      '/.temp',
+    ];
+
+    if (blockedSegments.any((seg) => lower.contains(seg))) return false;
+
+    // Skip MIUI trash files — named like ".trashed-1234567890-filename.mp4"
+    final filename = lower.split('/').last;
+    if (filename.startsWith('.trashed-') || filename.startsWith('.trash-')) return false;
+
+    // Skip files starting with dot (hidden system files)
+    if (filename.startsWith('.')) return false;
 
     final ext = lower.contains('.') ? '.${lower.split('.').last}' : '';
     return _videoExtensions.contains(ext);
   }
-
   Future<VideoModel?> _processVideoFile(File file) async {
     try {
       final filePath = file.path;
@@ -175,7 +201,15 @@ class VideoScannerService {
 
   Future<List<VideoModel>> quickScan() async {
     final existingVideos = await _dbService.getAllVideos();
-    final existingPaths = existingVideos.map((v) => v.filePath).toSet();
+    // Resolve existing paths to real paths for accurate dedup comparison
+    final existingPaths = <String>{};
+    for (final v in existingVideos) {
+      existingPaths.add(v.filePath);
+      try {
+        final real = await File(v.filePath).resolveSymbolicLinks();
+        existingPaths.add(real);
+      } catch (_) {}
+    }
 
     final Set<String> seenRealPaths = {};
     final List<VideoModel> newVideos = [];

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noirscreen/providers/rooms_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'dart:ui';
 import 'dart:io';
 import '../constants/app_colors.dart';
@@ -173,7 +174,7 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
     ));
   }
 
-  void _copyLink() {
+void _copyLink() {
     if (_createdRoom == null) return;
     Clipboard.setData(ClipboardData(text: _createdRoom!.shareableLink));
     HapticFeedback.lightImpact();
@@ -183,7 +184,17 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
     });
   }
 
-  // ── Date picker (SCHEDULE mode) ────────────────────────────────────────────
+void _shareLink() {
+    if (_createdRoom == null) return;
+    HapticFeedback.lightImpact();
+    SharePlus.instance.share(
+      ShareParams(
+        text: 'Join my NoirScreen watch party for "${_createdRoom!.videoTitle ?? widget.video.title}"!\n\n${_createdRoom!.shareableLink}',
+        subject: 'NoirScreen Watch Party',
+      ),
+    );
+
+  }  // ── Date picker (SCHEDULE mode) ────────────────────────────────────────────
   Future<void> _pickDateTime() async {
     final now = DateTime.now();
 
@@ -217,7 +228,6 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
   }
 
   // ── Custom scroll-wheel time picker ───────────────────────────────────────
-  // Replaces Flutter's default clock face with ugly green AM/PM
   Future<DateTime?> _showTimeScrollPicker(DateTime date) async {
     int selHour = _selectedDateTime.hour > 12
         ? _selectedDateTime.hour - 12
@@ -1119,15 +1129,42 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
                       ],
                     ),
                     const SizedBox(height: 14),
-                    Text(
-                      room.shareableLink,
-                      style: TextStyle(
-                        fontFamily: 'Inter',
-                        color: Colors.white.withOpacity(0.40),
-                        fontSize: 11,
-                        height: 1.5,
+                    GestureDetector(
+                      onTap: _copyLink,
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.04),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                              color: Colors.white.withOpacity(0.08),
+                              width: 0.8),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                room.shareableLink,
+                                style: TextStyle(
+                                  fontFamily: 'Inter',
+                                  color: AppColors.niorRed.withOpacity(0.70),
+                                  fontSize: 11,
+                                  height: 1.5,
+                                  decoration: TextDecoration.underline,
+                                  decorationColor:
+                                      AppColors.niorRed.withOpacity(0.30),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Icon(Icons.copy_rounded,
+                                color: Colors.white.withOpacity(0.20),
+                                size: 12),
+                          ],
+                        ),
                       ),
-                      textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 14),
                     Row(
@@ -1148,7 +1185,7 @@ class _RoomSetupScreenState extends ConsumerState<RoomSetupScreen>
                           child: _actionBtn(
                             label: 'SHARE',
                             icon: Icons.share_rounded,
-                            onTap: () {},
+                            onTap: _shareLink,
                             filled: false,
                           ),
                         ),
